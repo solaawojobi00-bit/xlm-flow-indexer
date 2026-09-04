@@ -35,8 +35,8 @@ enough to ingest directly, then a small set of analytical views sit on top.
 ```sql
 CREATE TABLE ledgers (
   sequence          INTEGER PRIMARY KEY,
-  closed_at         TEXT,     -- ISO8601
-  operation_count   INTEGER
+  closed_at         TEXT    NOT NULL,   -- ISO8601 (UTC)
+  operation_count   INTEGER NOT NULL
 );
 
 CREATE TABLE accounts (
@@ -45,41 +45,79 @@ CREATE TABLE accounts (
 
 CREATE TABLE operations (
   id                TEXT PRIMARY KEY,   -- Horizon operation id
-  ledger_sequence   INTEGER REFERENCES ledgers(sequence),
-  type              TEXT,               -- payment, path_payment_strict_send, etc.
-  source_account    TEXT REFERENCES accounts(account_id),
-  created_at        TEXT                -- ISO8601
+  ledger_sequence   INTEGER NOT NULL REFERENCES ledgers(sequence),
+  type              TEXT    NOT NULL,   -- payment, path_payment_strict_send, etc.
+  source_account    TEXT    NOT NULL REFERENCES accounts(account_id),
+  created_at        TEXT    NOT NULL    -- ISO8601 (UTC)
 );
 
 CREATE TABLE payments (
   operation_id      TEXT PRIMARY KEY REFERENCES operations(id),
-  from_account      TEXT REFERENCES accounts(account_id),
-  to_account        TEXT REFERENCES accounts(account_id),
-  asset_code        TEXT,               -- 'native' for XLM
-  asset_issuer      TEXT,               -- NULL for native
-  amount            TEXT                -- stored as string, cast at query time
-                                         -- (avoids float precision issues;
-                                         -- Postgres phase moves this to NUMERIC)
+  from_account      TEXT NOT NULL REFERENCES accounts(account_id),
+  to_account        TEXT NOT NULL REFERENCES accounts(account_id),
+  asset_code        TEXT NOT NULL,          -- 'native' for XLM
+  asset_issuer      TEXT NOT NULL DEFAULT '',  -- '' for native, never NULL
+  amount            TEXT NOT NULL           -- stored as string, cast at query time
+                                            -- (avoids float precision issues;
+                                            -- Postgres phase moves this to NUMERIC)
 );
 
 CREATE TABLE trustlines (
-  account_id        TEXT REFERENCES accounts(account_id),
-  asset_code        TEXT,
-  asset_issuer      TEXT,
-  established_at    TEXT,               -- ISO8601
+  account_id        TEXT NOT NULL REFERENCES accounts(account_id),
+  asset_code        TEXT NOT NULL,
+  asset_issuer      TEXT NOT NULL DEFAULT '',  -- '' for native, never NULL
+  established_at    TEXT NOT NULL,          -- ISO8601 (UTC)
   PRIMARY KEY (account_id, asset_code, asset_issuer)
 );
 
 CREATE TABLE trades (
-  id                  TEXT PRIMARY KEY,
-  ledger_sequence     INTEGER REFERENCES ledgers(sequence),
-  base_asset_code     TEXT,
-  counter_asset_code  TEXT,
-  base_amount         TEXT,
-  counter_amount      TEXT,
-  executed_at         TEXT                -- ISO8601
+  id                    TEXT PRIMARY KEY,
+  ledger_sequence       INTEGER NOT NULL REFERENCES ledgers(sequence),
+  base_asset_code       TEXT NOT NULL,
+  base_asset_issuer     TEXT NOT NULL DEFAULT '',  -- '' for native
+  counter_asset_code    TEXT NOT NULL,
+  counter_asset_issuer  TEXT NOT NULL DEFAULT '',  -- '' for native
+  base_amount           TEXT NOT NULL,
+  counter_amount        TEXT NOT NULL,
+  executed_at           TEXT NOT NULL       -- ISO8601 (UTC)
 );
 ```
+
+### Why `asset_issuer` is `''` for native and never `NULL`
+
+The obvious encoding for "this asset has no issuer" is `NULL`, but it cannot be
+used here. SQLite does not enforce uniqueness across `NULL` columns in a
+non-`INTEGER` primary key, so with a nullable issuer the row
+`(account, 'native', NULL)` can be inserted into `trustlines` without limit — the
+primary key that the whole idempotency guarantee rests on simply does not hold for
+the most common asset on the network.
+
+Postgres behaves the opposite way: `PRIMARY KEY` implies `NOT NULL`, so the same
+insert errors outright. Encoding native as `NULL` would therefore let Phase 1
+silently accumulate duplicates that the Phase 2 migration parity check rejects,
+with the two backends disagreeing about whether the data was ever valid.
+
+Using `''` consistently in `payments`, `trustlines` and `trades` keeps one code
+path, holds in both engines, and makes `payments(asset_code, asset_issuer)` a total
+key. The repository carries a regression test that asserts both halves of this: that
+the shipped schema rejects a duplicate native trustline, and that the nullable-issuer
+form accepts one.
+
+### Why `trades` carries issuer columns
+
+A Stellar asset is identified by code *and* issuer, so `base_asset_code` alone is
+not an asset identity. Without the issuer columns, `trade_pair_activity` would group
+two different `USDC` issuers into a single pair row with summed volume — an error
+that produces plausible-looking numbers on a small ledger range — and `trades` could
+not be joined to `payments` on asset identity at all. Horizon's `/trades` response
+already returns both issuers, so carrying them costs nothing at ingestion time.
+
+### Migration tracking
+
+Applied migrations are recorded in a `schema_migrations` table (`version`, `name`,
+`checksum`, `applied_at`). The checksum is what makes editing an already-applied
+migration a hard error rather than a silent divergence between the repository and a
+live database.
 
 Indexes (Phase 1): `payments(from_account)`, `payments(to_account)`,
 `payments(asset_code, asset_issuer)`, `operations(created_at)`,
