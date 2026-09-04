@@ -1,0 +1,12 @@
+// Build config: emits only src/ to dist/, flattened at the src root so the
+// published layout is dist/db/... rather than dist/src/db/...
+// The base tsconfig.json additionally includes test/ so `typecheck` covers tests,
+// but tests are never emitted.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}
