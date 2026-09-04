@@ -1,0 +1,32 @@
+# Claude Code local config / instructions
+.claude/
+CLAUDE.md
+
+# Node
+node_modules/
+dist/
+build/
+coverage/
+*.log
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# SQLite / local databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
