@@ -87,3 +87,7 @@ in for the ingestion pipeline.
 
 Node and a C toolchain for the native SQLite driver. Exact versions and install steps
 are documented alongside the CLI.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
