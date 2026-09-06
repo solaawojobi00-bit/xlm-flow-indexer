@@ -1,0 +1,13 @@
+node_modules/
+dist/
+package-lock.json
+
+# Markdown is excluded deliberately. PRD.md, ARCHITECTURE.md and BACKLOG.md are
+# hand-wrapped prose; letting Prettier reflow them would produce large diffs that
+# obscure real content changes and would fight the author's line breaks on every
+# edit. Formatting is enforced for code, not for documents.
+*.md
+
+# Prettier has no SQL parser, so migrations and views are left alone. Their
+# formatting is enforced by review.
+*.sql
