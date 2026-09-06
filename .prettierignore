@@ -11,3 +11,8 @@ package-lock.json
 # Prettier has no SQL parser, so migrations and views are left alone. Their
 # formatting is enforced by review.
 *.sql
+
+# Recorded Horizon responses. These are captured verbatim from a live endpoint and
+# rewritten only by scripts/capture-fixtures.ts; reformatting them would edit data
+# whose whole value is being untouched.
+test/fixtures/

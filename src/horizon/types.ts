@@ -29,6 +29,21 @@ export interface HorizonPage<T> {
   };
 }
 
+/**
+ * A closed ledger.
+ *
+ * Needed because `operations` and `trades` both reference `ledgers(sequence)`, and an
+ * operation record does not carry its ledger's close time or operation count -- only
+ * its own `created_at`. The parent rows have to come from somewhere.
+ */
+export interface HorizonLedger extends HorizonRecord {
+  readonly sequence: number;
+  readonly closed_at: string;
+  readonly operation_count: number;
+  readonly successful_transaction_count?: number;
+  readonly failed_transaction_count?: number;
+}
+
 export interface HorizonOperation extends HorizonRecord {
   readonly type: string;
   readonly type_i: number;
