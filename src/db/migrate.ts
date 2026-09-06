@@ -40,9 +40,7 @@ export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
 
     const match = FILENAME_PATTERN.exec(filename);
     if (!match) {
-      throw new Error(
-        `Migration filename "${filename}" must look like 001_description.sql`,
-      );
+      throw new Error(`Migration filename "${filename}" must look like 001_description.sql`);
     }
 
     const version = Number(match[1]);

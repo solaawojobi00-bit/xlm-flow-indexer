@@ -95,10 +95,7 @@ describe('native asset issuer handling (issue #1 amendment 1)', () => {
       /UNIQUE constraint failed/,
     );
 
-    assert.equal(
-      (db.prepare('SELECT COUNT(*) c FROM trustlines').get() as { c: number }).c,
-      1,
-    );
+    assert.equal((db.prepare('SELECT COUNT(*) c FROM trustlines').get() as { c: number }).c, 1);
     db.close();
   });
 
@@ -135,17 +132,13 @@ describe('native asset issuer handling (issue #1 amendment 1)', () => {
       )
     `);
 
-    const insert = db.prepare(
-      'INSERT INTO trustlines_as_documented VALUES (?, ?, ?, ?)',
-    );
+    const insert = db.prepare('INSERT INTO trustlines_as_documented VALUES (?, ?, ?, ?)');
     insert.run('GACCOUNT1', 'native', null, '2026-01-01T00:00:00Z');
     insert.run('GACCOUNT1', 'native', null, '2026-01-02T00:00:00Z');
     insert.run('GACCOUNT1', 'native', null, '2026-01-03T00:00:00Z');
 
     assert.equal(
-      (
-        db.prepare('SELECT COUNT(*) c FROM trustlines_as_documented').get() as { c: number }
-      ).c,
+      (db.prepare('SELECT COUNT(*) c FROM trustlines_as_documented').get() as { c: number }).c,
       3,
       'SQLite is expected to allow duplicate NULL-issuer rows despite the primary key',
     );
@@ -185,16 +178,38 @@ describe('trades issuer columns (issue #1 amendment 2)', () => {
     // Two USDC assets from different issuers traded against native. Without the
     // issuer columns these would be indistinguishable and trade_pair_activity
     // (issue #10) would merge them into one pair with summed volume.
-    insert.run('t1', 1, 'native', '', 'USDC', 'GISSUERA', '100.0000000', '10.0000000', '2026-01-01T00:00:00Z');
-    insert.run('t2', 1, 'native', '', 'USDC', 'GISSUERB', '200.0000000', '20.0000000', '2026-01-01T00:01:00Z');
+    insert.run(
+      't1',
+      1,
+      'native',
+      '',
+      'USDC',
+      'GISSUERA',
+      '100.0000000',
+      '10.0000000',
+      '2026-01-01T00:00:00Z',
+    );
+    insert.run(
+      't2',
+      1,
+      'native',
+      '',
+      'USDC',
+      'GISSUERB',
+      '200.0000000',
+      '20.0000000',
+      '2026-01-01T00:01:00Z',
+    );
 
     const pairs = db
-      .prepare(`
+      .prepare(
+        `
         SELECT counter_asset_code, counter_asset_issuer, COUNT(*) trades
         FROM trades
         GROUP BY base_asset_code, base_asset_issuer, counter_asset_code, counter_asset_issuer
         ORDER BY counter_asset_issuer
-      `)
+      `,
+      )
       .all() as Array<{ counter_asset_code: string; counter_asset_issuer: string; trades: number }>;
 
     assert.equal(pairs.length, 2, 'two issuers must produce two pair rows');
@@ -211,12 +226,14 @@ describe('trades issuer columns (issue #1 amendment 2)', () => {
     // A value that loses precision as an IEEE-754 double, which is why
     // ARCHITECTURE.md specifies TEXT storage with casting at query time.
     const amount = '9007199254740993.0000001';
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO trades (
         id, ledger_sequence, base_asset_code, base_asset_issuer,
         counter_asset_code, counter_asset_issuer, base_amount, counter_amount, executed_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('t1', 1, 'native', '', 'USDC', 'GISSUERA', amount, '1.0000000', '2026-01-01T00:00:00Z');
+    `,
+    ).run('t1', 1, 'native', '', 'USDC', 'GISSUERA', amount, '1.0000000', '2026-01-01T00:00:00Z');
 
     assert.equal(
       (db.prepare('SELECT base_amount FROM trades').get() as { base_amount: string }).base_amount,
