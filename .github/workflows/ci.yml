@@ -14,14 +14,47 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  # Kept in step with the "engines" field in package.json. Both must move together.
-  NODE_VERSION: '24'
-
 jobs:
   # Job names below become required status checks when branch protection lands
   # (BACKLOG.md item 20). Renaming one silently detaches it from branch protection
   # and the check stops being enforced, so treat these names as an interface.
+  #
+  # Every job reads the Node version from .nvmrc via node-version-file, so the pin
+  # lives in exactly one place and local development and CI cannot drift apart.
+  # An exact patch is deliberate: each Node patch ships one fixed npm version, so
+  # pinning Node pins npm too, with no packageManager field or corepack needed.
+  # A floating '24' does not -- the first CI run resolved to 24.20.0 (npm 11.19.0)
+  # while local development was on 24.14.0 (npm 11.9.0), a gap wide enough that
+  # npm 11.19 has an install-scripts approval command 11.9 lacks entirely.
+
+  toolchain:
+    name: toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+
+      # Recorded so a future drift is visible in the log rather than inferred from
+      # a warning, and so the install-script approval follow-up has a known target.
+      - name: Report resolved toolchain
+        run: |
+          echo "node: $(node --version)"
+          echo "npm:  $(npm --version)"
+          echo "### Toolchain" >> "$GITHUB_STEP_SUMMARY"
+          echo "- node \`$(node --version)\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- npm \`$(npm --version)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: .nvmrc matches the Node actually in use
+        run: |
+          pinned="v$(tr -d '[:space:]' < .nvmrc)"
+          actual="$(node --version)"
+          echo "pinned=$pinned actual=$actual"
+          if [ "$pinned" != "$actual" ]; then
+            echo "::error::.nvmrc pins $pinned but the runner resolved $actual."
+            exit 1
+          fi
 
   format:
     name: format
@@ -30,7 +63,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm run format:check
@@ -42,7 +75,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm run lint
@@ -54,7 +87,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -66,7 +99,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
 
@@ -89,7 +122,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm test
