@@ -1,6 +1,7 @@
 import { HorizonHttpError, HorizonRetryLimitError, HorizonTimeoutError } from './errors.ts';
 import type {
   HorizonEffect,
+  HorizonLedger,
   HorizonOperation,
   HorizonPage,
   HorizonRecord,
@@ -220,6 +221,12 @@ export class HorizonClient {
       if (last === undefined || last.paging_token === cursor) return;
       cursor = last.paging_token;
     }
+  }
+
+  ledgers(
+    params: PagingParams & Readonly<Record<string, string | number | undefined>> = {},
+  ): AsyncGenerator<HorizonLedger, void, undefined> {
+    return this.paginate<HorizonLedger>('/ledgers', params);
   }
 
   operations(
