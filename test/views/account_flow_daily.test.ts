@@ -123,20 +123,22 @@ describe('account_flow_daily view', () => {
       .all(accountA) as AccountFlowDailyRow[];
 
     assert.equal(rowsA.length, 1, 'account A must have exactly 1 row for the day');
-    assert.equal(rowsA[0].day, '2026-09-04');
-    assert.equal(rowsA[0].inbound, 40.0);
-    assert.equal(rowsA[0].outbound, 100.0);
-    assert.equal(rowsA[0].net, -60.0);
+    const rowA = rowsA[0]!;
+    assert.equal(rowA.day, '2026-09-04');
+    assert.equal(rowA.inbound, 40.0);
+    assert.equal(rowA.outbound, 100.0);
+    assert.equal(rowA.net, -60.0);
 
     const rowsB = db
       .prepare(`SELECT * FROM account_flow_daily WHERE account_id = ?`)
       .all(accountB) as AccountFlowDailyRow[];
 
     assert.equal(rowsB.length, 1, 'account B must have exactly 1 row for the day');
-    assert.equal(rowsB[0].day, '2026-09-04');
-    assert.equal(rowsB[0].inbound, 100.0);
-    assert.equal(rowsB[0].outbound, 40.0);
-    assert.equal(rowsB[0].net, 60.0);
+    const rowB = rowsB[0]!;
+    assert.equal(rowB.day, '2026-09-04');
+    assert.equal(rowB.inbound, 100.0);
+    assert.equal(rowB.outbound, 40.0);
+    assert.equal(rowB.net, 60.0);
   });
 
   it('handles self-payments by inflating inbound and outbound equally while netting to zero', () => {
@@ -200,9 +202,11 @@ describe('account_flow_daily view', () => {
       .all(account) as AccountFlowDailyRow[];
 
     assert.equal(rows.length, 2);
-    assert.equal(rows[0].day, '2026-09-04');
-    assert.equal(rows[0].outbound, 10.0);
-    assert.equal(rows[1].day, '2026-09-05');
-    assert.equal(rows[1].outbound, 20.0);
+    const row0 = rows[0]!;
+    const row1 = rows[1]!;
+    assert.equal(row0.day, '2026-09-04');
+    assert.equal(row0.outbound, 10.0);
+    assert.equal(row1.day, '2026-09-05');
+    assert.equal(row1.outbound, 20.0);
   });
 });
