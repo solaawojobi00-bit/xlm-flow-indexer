@@ -82,16 +82,31 @@ export interface HorizonEffect extends HorizonRecord {
 
 export interface HorizonTrade extends HorizonRecord {
   readonly ledger_close_time: string;
-  readonly base_account?: string;
+
+  /**
+   * 'orderbook' or 'liquidity_pool'. Optional because Horizon added it in v2; a
+   * response without it predates liquidity pools, so order-book is the only thing it
+   * could describe.
+   */
+  readonly trade_type?: string;
+
   readonly base_amount: string;
   readonly base_asset_type: string;
   readonly base_asset_code?: string;
   readonly base_asset_issuer?: string;
-  readonly counter_account?: string;
   readonly counter_amount: string;
   readonly counter_asset_type: string;
   readonly counter_asset_code?: string;
   readonly counter_asset_issuer?: string;
+
+  // Exactly one side of a trade is an account or a pool, never both. Either side may
+  // be the pool in a liquidity_pool trade -- both shapes occur on testnet -- so
+  // neither pool id can be assumed absent.
+  readonly base_account?: string;
+  readonly counter_account?: string;
+  readonly base_liquidity_pool_id?: string;
+  readonly counter_liquidity_pool_id?: string;
+  readonly liquidity_pool_fee_bp?: number;
 }
 
 /**

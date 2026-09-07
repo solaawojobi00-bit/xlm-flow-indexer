@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Record real Horizon responses for a ledger range into a replayable fixture.
  *
  * Why this exists: ARCHITECTURE.md requires Phase 1 to be verified against a real,
@@ -28,6 +28,7 @@ import { HorizonClient } from '../src/horizon/client.ts';
 import { openDb } from '../src/db/client.ts';
 import { migrate } from '../src/db/migrate.ts';
 import { ingestPayments } from '../src/ingest/payments.ts';
+import { ingestTrades } from '../src/ingest/trades.ts';
 import { ingestTrustlines } from '../src/ingest/trustlines.ts';
 
 const DEFAULT_HORIZON = 'https://horizon-testnet.stellar.org';
@@ -45,7 +46,7 @@ export interface Fixture {
   readonly responses: Record<string, unknown>;
 }
 
-const JOBS = ['payments', 'trustlines'] as const;
+const JOBS = ['payments', 'trustlines', 'trades'] as const;
 type JobName = (typeof JOBS)[number];
 
 function isJobName(value: string): value is JobName {
@@ -66,7 +67,7 @@ function parseArgs(argv: string[]): Args {
   };
 
   const usage =
-    'Usage: node scripts/capture-fixtures.ts --job <payments|trustlines> --from <ledger> --to <ledger>';
+    'Usage: node scripts/capture-fixtures.ts --job <payments|trustlines|trades> --from <ledger> --to <ledger>';
 
   const job = get('--job') ?? 'payments';
   if (!isJobName(job)) throw new Error(usage);
@@ -113,7 +114,9 @@ async function main(argv: string[]): Promise<number> {
   const summary =
     job === 'payments'
       ? await ingestPayments(db, client, range)
-      : await ingestTrustlines(db, client, range);
+      : job === 'trades'
+        ? await ingestTrades(db, client, range)
+        : await ingestTrustlines(db, client, range);
   db.close();
 
   const fixture: Fixture = {
