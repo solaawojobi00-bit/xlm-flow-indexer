@@ -1,92 +1,256 @@
 # xlm-flow-indexer
 
-A lightweight, self-hostable indexer that pulls Stellar ledger data out of Horizon
-into a relational schema built for analytical SQL.
-
-> **Status: early development.** The schema and ingestion pipeline are being built
-> out under Phase 1. Nothing here is usable yet — there is no published release and
-> no working setup path. Setup and usage instructions land once the CLI and the
-> analytical views exist.
+A lightweight, self-hostable indexer that pulls Stellar ledger data out of Horizon into a relational schema built for analytical SQL.
 
 ## The problem
 
-Answering historical questions about Stellar activity — how an account's asset flow
-has changed over the last 90 days, what payment volume moved through a given anchor
-this month, which assets see the most path-payment routing — currently means standing
-up your own Horizon ingestion pipeline.
+Anyone building on Stellar who wants to answer historical questions — how an account's asset flow has changed over time, what payment volume moved through an anchor this month, which assets see the most path-payment routing, or how DEX trading is distributed between orderbooks and liquidity pools — currently has to stand up their own ingestion pipeline.
 
-Horizon is not built for that. It is an operational API rather than an analytical
-store, and complex aggregate queries against it are slow or simply not expressible.
-This project fills that gap: ingest once, then query with ordinary SQL.
+Horizon is not built for analytical aggregation. It is an operational API, and complex analytical aggregate queries against it are slow or impossible. `xlm-flow-indexer` ingests ledger data once and makes it queryable with standard SQL views.
 
-It complements Horizon rather than replacing it. There is no attempt at operational
-parity — no transaction submission, no transaction building.
+It complements Horizon rather than replacing it — there is no attempt at operational parity (no transaction submission or transaction building).
 
-## How it works
+See [PRD.md](PRD.md) for background, design goals, and non-goals.
 
-Three layers:
+---
 
-- **Ingestion** — polls Horizon's `/operations`, `/effects` and `/trades` endpoints
-  using cursor-based paging, and writes into normalized raw tables. Idempotent by
-  primary key, so re-running over an already-ingested range is a no-op rather than a
-  source of duplicate rows.
-- **Storage** — a normalized schema designed for aggregate queries. SQLite for local
-  development, CI and Phase 1 verification; Postgres as the Phase 2 production target,
-  from the same schema and ingestion code.
-- **Query** — the analytical work lives in SQL views rather than application code, so
-  it is portable between both backends and independently testable.
+## Prerequisites
 
-## Data model
+- **Node.js**: `v24.0.0` or higher (uses native Node test runner and ESM modules).
+- **C/C++ Build Toolchain**: Required for compiling the native SQLite driver (`better-sqlite3`). On Linux/macOS, standard build tools (`gcc`, `g++`, `make`, or `xcode-select`) and Python are needed; on Windows, Visual Studio Build Tools or Windows Build Tools are required.
 
-Six raw tables mirror Horizon's operation and effect model closely enough to ingest
-directly: `ledgers`, `accounts`, `operations`, `payments`, `trustlines` and `trades`.
-The analytical views sit on top of these.
+## Installation
 
-Amounts are stored as text exactly as Horizon returns them and cast at query time,
-which avoids the precision loss that comes from round-tripping decimal values through
-a float. Timestamps are stored as ISO8601 UTC.
+Clone the repository and install dependencies:
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full schema and the reasoning behind it.
+```bash
+git clone https://github.com/solaawojobi00-bit/xlm-flow-indexer.git
+cd xlm-flow-indexer
+npm install
+```
 
-## Analytical views
+---
 
-Five views ship with Phase 1, each answering a question the raw tables cannot answer
-cheaply:
+## Quickstart & CLI Usage
 
-| View | Answers |
-| --- | --- |
-| `account_flow_daily` | Net value in and out, per account, per asset, per day |
-| `asset_velocity` | How much an asset actually moves, and among how many accounts |
-| `anchor_payment_volume` | Payment volume grouped by anchor issuer |
-| `trade_pair_activity` | Trade count and volume per asset pair |
-| `top_accounts_by_volume` | Accounts ranked by total payment volume |
+The CLI (`xlm-flow-indexer` / `src/cli.ts`) manages schema migrations and runs ingestion jobs against Horizon.
 
-The anchor issuer list is configuration, not hardcoded values.
+### 1. Apply schema migrations
 
-## Roadmap
+Before ingesting, initialize the database schema and analytical views:
 
-- **Phase 1** — core schema, ingestion of payments, trustlines and trades from a real
-  testnet ledger range into SQLite, the five analytical views, CLI, CI.
-- **Phase 2** — Postgres support behind the same schema, migration tooling and a
-  verified migration path, materialized views for the expensive aggregations, and
-  incremental ingestion rather than full re-ingest.
-- **Phase 3 (stretch)** — read-only query API over the views, Soroban contract event
-  ingestion, streaming ingestion.
+```bash
+npm run migrate -- --db ./indexer.db
+```
 
-Phase 1 is verified against real testnet ledger data. Synthetic fixtures do not stand
-in for the ingestion pipeline.
+Or using the CLI directly:
 
-## Documentation
+```bash
+node src/cli.ts migrate --db ./indexer.db
+```
 
-- [PRD.md](PRD.md) — problem, goals, non-goals, success criteria
-- [ARCHITECTURE.md](ARCHITECTURE.md) — schema, ingestion design, the SQLite to
-  Postgres migration path
-- [BACKLOG.md](BACKLOG.md) — phased work items
+### 2. Ingest ledger data
 
-## Requirements
+Ingest payments, trustlines, and trades over a target ledger range:
 
-Node and a C toolchain for the native SQLite driver. Exact versions and install steps
-are documented alongside the CLI.
+```bash
+node src/cli.ts ingest --from 4539850 --to 4539862 --db ./indexer.db --anchors config/anchors.json
+```
+
+#### CLI Ingest Options
+
+- `--from <sequence>`: Starting ledger sequence (integer > 0, required).
+- `--to <sequence>`: Ending ledger sequence (integer >= from, required).
+- `--db <path>`: Path to the SQLite database file (required).
+- `--horizon <url>`: Horizon base URL (default: `https://horizon-testnet.stellar.org`).
+- `--anchors <path>`: Optional JSON file defining known anchor issuer accounts.
+- `--jobs <list>`: Comma-separated list of jobs to run (`payments`, `trustlines`, `trades`). Default: all jobs.
+- `--payments`: Ingest payment operations only.
+- `--trustlines`: Ingest trustline creations only.
+- `--trades`: Ingest orderbook and liquidity pool trades only.
+
+Ingestion is fully idempotent — running ingestion multiple times over the same ledger range safely ignores duplicate records without duplicating database rows.
+
+---
+
+## Schema Overview
+
+The database uses a normalized raw storage layer designed for portable SQL aggregation:
+
+- **`ledgers`**: Records ledger sequence numbers, UTC close timestamps (`closed_at`), and operation counts.
+- **`accounts`**: Master registry of all Stellar account public keys encountered in ledger operations.
+- **`operations`**: Horizon operations linked to their parent `ledgers` and `accounts`, storing operation `type` and `created_at` timestamp.
+- **`payments`**: Payment operations referencing `operations`, recording sender (`from_account`), recipient (`to_account`), asset details (`asset_code`, `asset_issuer`), and decimal transfer `amount`. Native XLM uses `asset_issuer = ''` (never `NULL`) to ensure deterministic primary keys.
+- **`trustlines`**: Tracked trustline establishments keyed by `(account_id, asset_code, asset_issuer)` with the initial `established_at` timestamp.
+- **`trades`**: DEX trades referencing `ledgers`, storing base and counter asset codes and issuers, trade amounts, execution timestamp, and `trade_type` (`orderbook` or `liquidity_pool`).
+- **`anchor_issuers`**: Lookup table for configured anchor issuer public keys (`account_id`, `name`, `home_domain`), joined by anchor analytical views.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full schema definitions, type representations, and design rationale.
+
+---
+
+## Analytical Views
+
+Five pre-built SQL views provide instant analytical insights without requiring custom ETL scripts.
+
+### 1. `account_flow_daily`
+Calculates daily inbound, outbound, and net asset flow per account and asset.
+
+```sql
+SELECT account_id, asset_code, day, inbound, outbound, net
+FROM account_flow_daily
+ORDER BY day DESC, net DESC
+LIMIT 5;
+```
+
+**Sample Output:**
+```text
+┌────────────────────────────────────────────────────────────┬────────────┬──────────────┬─────────┬──────────┬──────┐
+│ account_id                                                 │ asset_code │ day          │ inbound │ outbound │ net  │
+├────────────────────────────────────────────────────────────┼────────────┼──────────────┼─────────┼──────────┼──────┤
+│ GBTORQK3ZR3RPJF4WTTSH5KVDOAZ4BJI7PD2ECLSBDNHRG4ICNC4JJZV   │ native     │ 2026-09-06   │ 8.0     │ 6.0      │ 2.0  │
+│ GB5FCYPSK4ET44OVBXLJHWFW5LNG3ZLPUFSJTJBCGIM43JIU4RGYRLCH   │ native     │ 2026-09-06   │ 6.0     │ 8.0      │ -2.0 │
+│ GB7U7ODIHW4QFO7L3KMO6SJJ6Z56PQ7YWCNGCHAEQZ34GDMQCBFC2FVB   │ PYUSD      │ 2026-09-06   │ 0.0000001│ 0.0     │ 1e-7 │
+│ GAC35UVYN2ZR6A6PZZAPMGAKWWOCI6O7HGWHYS4HGREUIT6SW5K2UKF3   │ PYUSD      │ 2026-09-06   │ 0.0     │ 0.0000001│ -1e-7│
+└────────────────────────────────────────────────────────────┴────────────┴──────────────┴─────────┴──────────┴──────┘
+```
+
+### 2. `asset_velocity`
+Measures transfer volume, operation counts, and distinct sender/receiver participation per asset and day.
+
+```sql
+SELECT asset_code, day, transfer_count, total_volume, distinct_senders, distinct_receivers
+FROM asset_velocity
+ORDER BY day DESC, total_volume DESC;
+```
+
+**Sample Output:**
+```text
+┌────────────┬──────────────┬────────────────┬──────────────┬──────────────────┬────────────────────┐
+│ asset_code │ day          │ transfer_count │ total_volume │ distinct_senders │ distinct_receivers │
+├────────────┼──────────────┼────────────────┼──────────────┼──────────────────┼────────────────────┤
+│ native     │ 2026-09-06   │ 7              │ 14.0         │ 2                │ 2                  │
+│ PYUSD      │ 2026-09-06   │ 1              │ 0.0000001    │ 1                │ 1                  │
+└────────────┴──────────────┴────────────────┴──────────────┴──────────────────┴────────────────────┘
+```
+
+### 3. `anchor_payment_volume`
+Aggregates payment volume and transaction counts for anchor issuers loaded in `anchor_issuers`.
+
+```sql
+SELECT issuer_account_id, anchor_name, asset_code, day, payment_count, total_volume
+FROM anchor_payment_volume
+ORDER BY day DESC, total_volume DESC;
+```
+
+**Sample Output:**
+```text
+┌────────────────────────────────────────────────────────────┬───────────────────┬────────────┬──────────────┬───────────────┬──────────────┐
+│ issuer_account_id                                          │ anchor_name       │ asset_code │ day          │ payment_count │ total_volume │
+├────────────────────────────────────────────────────────────┼───────────────────┼────────────┼──────────────┼───────────────┼──────────────┤
+│ GBT2KJDKUZYZTQPCSR57VZT5NJHI4H7FOB5LT5FPRWSR7I5B4FS3UU7G   │ Paxos (Testnet)   │ PYUSD      │ 2026-09-06   │ 1             │ 0.0000001    │
+└────────────────────────────────────────────────────────────┴───────────────────┴────────────┴──────────────┴───────────────┴──────────────┘
+```
+
+### 4. `trade_pair_activity`
+Reports DEX trade count and volume normalized across asset pairs, distinguishing between orderbook and liquidity pool executions.
+
+```sql
+SELECT asset_a_code, asset_b_code, day, trade_count, asset_a_volume, asset_b_volume, orderbook_trades_count, liquidity_pool_trades_count
+FROM trade_pair_activity
+ORDER BY day DESC, trade_count DESC;
+```
+
+**Sample Output:**
+```text
+┌──────────────┬──────────────┬──────────────┬─────────────┬────────────────┬────────────────┬────────────────────────┬─────────────────────────────┐
+│ asset_a_code │ asset_b_code │ day          │ trade_count │ asset_a_volume │ asset_b_volume │ orderbook_trades_count │ liquidity_pool_trades_count │
+├──────────────┼──────────────┼──────────────┼─────────────┼────────────────┼────────────────┼────────────────────────┼─────────────────────────────┤
+│ USDC         │ native       │ 2026-09-06   │ 4           │ 20.0           │ 185.1851852    │ 4                      │ 0                           │
+│ CETES        │ USDC         │ 2026-09-06   │ 3           │ 221.67         │ 15.0           │ 3                      │ 0                           │
+│ CETES        │ native       │ 2026-09-06   │ 3           │ 221.67         │ 135.8300105    │ 0                      │ 3                           │
+│ SHOAM        │ USDC         │ 2026-09-06   │ 1           │ 5.0            │ 5.0            │ 1                      │ 0                           │
+│ SHOAM        │ native       │ 2026-09-06   │ 1           │ 5.0            │ 25.3564611     │ 1                      │ 0                           │
+└──────────────┴──────────────┴──────────────┴─────────────┴────────────────┴────────────────┴────────────────────────┴─────────────────────────────┘
+```
+
+### 5. `top_accounts_by_volume`
+Ranks accounts by outbound sent volume, inbound received volume, and combined throughput.
+
+```sql
+SELECT account_id, asset_code, day, sent_count, received_count, payment_count, sent_volume, received_volume, combined_volume
+FROM top_accounts_by_volume
+ORDER BY day DESC, combined_volume DESC, account_id ASC
+LIMIT 5;
+```
+
+**Sample Output:**
+```text
+┌────────────────────────────────────────────────────────────┬────────────┬──────────────┬────────────┬────────────────┬───────────────┬─────────────┬─────────────────┬─────────────────┐
+│ account_id                                                 │ asset_code │ day          │ sent_count │ received_count │ payment_count │ sent_volume │ received_volume │ combined_volume │
+├────────────────────────────────────────────────────────────┼────────────┼──────────────┼────────────┼────────────────┼───────────────┼─────────────┼─────────────────┼─────────────────┤
+│ GB5FCYPSK4ET44OVBXLJHWFW5LNG3ZLPUFSJTJBCGIM43JIU4RGYRLCH   │ native     │ 2026-09-06   │ 4          │ 3              │ 7             │ 8.0         │ 6.0             │ 14.0            │
+│ GBTORQK3ZR3RPJF4WTTSH5KVDOAZ4BJI7PD2ECLSBDNHRG4ICNC4JJZV   │ native     │ 2026-09-06   │ 3          │ 4              │ 7             │ 6.0         │ 8.0             │ 14.0            │
+│ GAC35UVYN2ZR6A6PZZAPMGAKWWOCI6O7HGWHYS4HGREUIT6SW5K2UKF3   │ PYUSD      │ 2026-09-06   │ 1          │ 0              │ 1             │ 0.0000001   │ 0.0             │ 0.0000001       │
+│ GB7U7ODIHW4QFO7L3KMO6SJJ6Z56PQ7YWCNGCHAEQZ34GDMQCBFC2FVB   │ PYUSD      │ 2026-09-06   │ 0          │ 1              │ 1             │ 0.0         │ 0.0000001       │ 0.0000001       │
+└────────────────────────────────────────────────────────────┴────────────┴──────────────┴────────────┴────────────────┴───────────────┴─────────────┴─────────────────┴─────────────────┘
+```
+
+---
+
+## Pinned Testnet Range & Fixtures
+
+Phase 1 correctness is validated against recorded testnet ledger ranges captured from Horizon `28.0.1` on **2026-09-06**:
+
+| Job | Ledger Range | Highlights |
+| --- | --- | --- |
+| **Payments** | `4539850 – 4539862` (13 ledgers) | 8 payments spanning native XLM and PYUSD; 4 distinct accounts |
+| **Trustlines** | `4540630 – 4540680` (51 ledgers) | 5 `trustline_created` effects (COLIBRI, USDC) and 1 `trustline_updated` filter case |
+| **Trades** | `4534150 – 4534300` (151 ledgers) | 12 DEX trades: 9 orderbook and 3 liquidity pool across CETES, USDC, SHOAM, native |
+
+### Testnet Resets and Re-Pinning
+
+> [!WARNING]
+> The Stellar testnet is periodically reset by the SDF. When a reset occurs, previous ledger sequences are wiped and Horizon will return 404 for historical ranges.
+
+When testnet resets:
+1. Identify dense ledger ranges on the active testnet covering native and issued payments, trustline creations/updates, and orderbook/liquidity pool trades.
+2. Re-record fixtures using the capture script:
+   ```bash
+   node scripts/capture-fixtures.ts --job payments   --from <ledger> --to <ledger>
+   node scripts/capture-fixtures.ts --job trustlines --from <ledger> --to <ledger>
+   node scripts/capture-fixtures.ts --job trades     --from <ledger> --to <ledger>
+   ```
+3. Update fixture assertions in the test suite as documented in [`test/fixtures/README.md`](test/fixtures/README.md).
+
+---
+
+## Testing & Quality Assurance
+
+Run the test suite, linter, and format checks:
+
+```bash
+# Run all unit and view regression tests
+npm test
+
+# Typecheck TypeScript sources
+npm run typecheck
+
+# Lint codebase
+npm run lint
+
+# Check formatting
+npm run format:check
+```
+
+---
+
+## Documentation Links
+
+- [PRD.md](PRD.md) — Problem statement, goals, non-goals, and success metrics.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Architectural design, schema DDL, indexing, and Postgres migration roadmap.
+- [BACKLOG.md](BACKLOG.md) — Phased work breakdown and implementation roadmap.
+- [test/fixtures/README.md](test/fixtures/README.md) — Horizon fixture recording and testnet capture methodology.
 
 ## License
 
