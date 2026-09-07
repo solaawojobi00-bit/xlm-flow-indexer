@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const FIXTURE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
 
 export interface Fixture {
+  readonly job: string;
   readonly capturedAt: string;
   readonly horizonUrl: string;
   readonly networkPassphrase: string;

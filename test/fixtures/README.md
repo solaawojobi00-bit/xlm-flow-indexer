@@ -21,45 +21,76 @@ the same one that runs against live Horizon.
 At the time of capture `history_elder_ledger` was `128` — the current testnet instance
 retains history only back to its most recent reset, which is the concern made concrete.
 
-## Current fixture
+## Current fixtures
 
-`testnet-4539850-4539862/horizon.json`
+Each job gets its own range. Testnet activity is uneven enough that this is not a
+convenience: the range with payment traffic contains **zero** trustline effects, and
+the range with trustline activity has almost no payments.
+
+Both were captured 2026-09-06 from Horizon `28.0.1` at
+`https://horizon-testnet.stellar.org`, network `Test SDF Network ; September 2015`.
+
+### `testnet-payments-4539850-4539862/`
 
 | | |
 | --- | --- |
-| Network | `Test SDF Network ; September 2015` |
-| Horizon | `28.0.1` at `https://horizon-testnet.stellar.org` |
 | Ledger range | 4539850 – 4539862 (13 ledgers) |
-| Captured | 2026-09-06 |
 | Operations in range | 140 |
 | Payment-type operations | 8 — 7 native, 1 PYUSD |
 | Distinct accounts | 4 |
 
-The range was chosen for density rather than recency: it is the smallest window found
-that carries both native and issued-asset payments, so the `asset_issuer` encoding from
-issue #1 is exercised against real data instead of only synthetic rows.
+Chosen for density rather than recency: the smallest window found carrying both native
+and issued-asset payments, so the `asset_issuer` encoding from issue #1 is exercised
+against real data instead of only synthetic rows.
+
+### `testnet-trustlines-4540630-4540680/`
+
+| | |
+| --- | --- |
+| Ledger range | 4540630 – 4540680 (51 ledgers) |
+| Effects in range | 279 |
+| `trustline_created` | 5 — 3 COLIBRI, 2 USDC |
+| `trustline_updated` | 1 (asset `TESTGK26`, ledger 4540642) |
+| Distinct accounts | 6 |
+
+The single `trustline_updated` is the reason this range was chosen. It is the case that
+distinguishes reading `/effects` from reading `change_trust` operations: an update
+against an existing line is not an establishment, and a job reading operations would
+record it as one. The suite asserts that asset is absent from `trustlines`.
 
 ## Re-capturing after a testnet reset
 
-When testnet resets, this range stops existing and the ingestion tests will fail
-against a fresh capture attempt. Pick a new range and re-record:
+When testnet resets, these ranges stop existing and the ingestion tests will fail
+against a fresh capture attempt. Pick new ranges and re-record each job:
 
 ```
-node scripts/capture-fixtures.ts --from <ledger> --to <ledger>
+node scripts/capture-fixtures.ts --job payments   --from <ledger> --to <ledger>
+node scripts/capture-fixtures.ts --job trustlines --from <ledger> --to <ledger>
 ```
+
+A replacement trustlines range needs at least one `trustline_created` and ideally one
+`trustline_updated`, or the distinction above stops being tested.
 
 The capture is driven by the real ingestion code, so the fixture always contains
 exactly the requests the code makes — a hand-written capture would drift the moment
 paging changed.
 
-Then update: the table above, `FIXTURE_NAME` in `test/ingest/payments.test.ts`, and the
-expected counts and issuer in that suite. Those expectations are deliberately hard
-coded to the recorded data; deriving them from the fixture would make the tests
-tautological.
+Then update: the tables above, the fixture names in `test/ingest/payments.test.ts` and
+`test/ingest/trustlines.test.ts`, and the expected counts, issuers and asset codes in
+both suites. Those expectations are deliberately hard coded to the recorded data;
+deriving them from the fixture would make the tests tautological.
 
 ## What is not covered
 
-No path payments appear in the current range — testnet activity is dominated by
-Soroban `invoke_host_function` calls. The ingestion handles all three payment types and
-the type filter is unit tested, but the path payment branch has no real-data assertion
-yet. Worth folding into the next re-capture if a range containing one can be found.
+- **No path payments** appear in the payments range — testnet activity is dominated by
+  Soroban `invoke_host_function` calls. The ingestion handles all three payment types
+  and the type filter is unit tested, but the path payment branch has no real-data
+  assertion yet.
+- **No trustline removal and re-establishment** appears in the trustlines range. The
+  policy (earliest `established_at` wins) is asserted against direct inserts rather
+  than recorded effects, since no such sequence was available to record.
+- **No `liquidity_pool_trade`** in either range, though one was observed nearby while
+  surveying. Relevant to issue #5, where whether pool trades are in scope is still an
+  open question.
+
+Worth folding these into a future re-capture if ranges containing them can be found.

@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';
+﻿import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
 import { openDb, type Db } from '../../src/db/client.ts';
@@ -8,7 +8,7 @@ import { cursorBeforeLedger, ledgerOf } from '../../src/horizon/toid.ts';
 import { ingestPayments, normaliseAsset, PAYMENT_TYPES } from '../../src/ingest/payments.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 
-const FIXTURE_NAME = 'testnet-4539850-4539862';
+const FIXTURE_NAME = 'testnet-payments-4539850-4539862';
 const fixture = loadFixture(FIXTURE_NAME);
 
 let server: FixtureServer;
