@@ -1,0 +1,14 @@
+# Blank issues are disabled so every report arrives through one of the forms above.
+# The forms exist to make reports reproducible; leaving a blank escape hatch in place
+# means the escape hatch becomes the default and the forms collect nothing.
+blank_issues_enabled: false
+
+# Destinations for things that are not bugs or feature requests. These render as
+# links below the form chooser rather than as issue templates.
+contact_links:
+  - name: Usage and setup questions
+    url: https://github.com/solaawojobi00-bit/xlm-flow-indexer#quickstart--cli-usage
+    about: Installation, migrations, ingestion flags, and the analytical views are documented in the README.
+  - name: Planned work and roadmap
+    url: https://github.com/solaawojobi00-bit/xlm-flow-indexer/blob/main/BACKLOG.md
+    about: Check the phased backlog before filing — the work you have in mind may already be scheduled.
