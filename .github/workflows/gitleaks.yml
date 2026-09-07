@@ -1,0 +1,244 @@
+name: Secret Scan
+
+# Catches credentials that reach a branch before they reach main.
+#
+# Scan scope is deliberately split by trigger. Pull requests and pushes scan
+# only the commits they introduce, which keeps the check fast enough to sit in
+# the PR feedback loop. Scanning full history on every push would re-scan the
+# same thousands of commits to find nothing new. Full history is instead swept
+# weekly, which is what actually catches a secret that predates this workflow
+# or that slipped in while the rules were narrower than they are now.
+#
+# ---------------------------------------------------------------------------
+# Allowlisting known-safe findings
+# ---------------------------------------------------------------------------
+# This repository commits Horizon API captures under test/fixtures/ and anchor
+# definitions under config/anchors.json. Those hold Stellar public keys, which
+# are public by design, but a future fixture could still trip a generic
+# high-entropy rule. There are three ways to silence a false positive, in
+# increasing order of blast radius:
+#
+# 1. Single line -- append a `gitleaks:allow` comment to the offending line:
+#
+#        const token = 'AKIAIOSFODNN7EXAMPLE'; // gitleaks:allow
+#
+#    Best for a one-off in source. It lives next to the value it excuses, so a
+#    reviewer sees the exemption and the string it covers in the same diff.
+#
+# 2. A path or pattern -- create `.gitleaks.toml` at the repository root. It is
+#    picked up automatically; no change to this workflow is needed.
+#
+#        [extend]
+#        useDefault = true          # REQUIRED -- see the warning below
+#
+#        [[allowlists]]
+#        description = "Horizon fixture captures hold public Stellar keys only"
+#        targetRules = ["generic-api-key"]
+#        paths = ['''test/fixtures/.*/horizon\.json''']
+#
+#    WARNING: omitting `[extend] useDefault = true` replaces the built-in rule
+#    set instead of adding to it. The scan then passes because it is looking
+#    for almost nothing -- a green check that means the opposite of what it
+#    appears to mean. Always extend; never start from an empty config.
+#
+#    Prefer `targetRules` over a bare `[[allowlists]]`. A global allowlist on
+#    `paths` exempts that file from EVERY rule, so a real AWS key added to a
+#    fixture later would also go unreported.
+#
+# 3. A specific commit -- `commits = ["<sha>"]` in an allowlist block. Use this
+#    only for a finding already rotated and burned into history, and say so in
+#    the `description`. It is the widest exemption available.
+#
+# Every allowlist entry needs a `description` explaining why the match is safe.
+# A rule nobody can justify later is a rule that gets copied forward forever.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 04:17 UTC. Off the hour on purpose: scheduled jobs queued at :00
+    # contend with everyone else's cron and start late.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+# Matches ci.yml. Pushing twice to a PR should not leave the first scan running.
+# event_name is part of the key so a push to main cannot cancel the weekly
+# full-history sweep -- they share a ref, but only one of them is replaceable.
+concurrency:
+  group: gitleaks-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned to an exact release and verified by checksum below. A floating tag on
+  # a security scanner is a supply-chain hole: it lets an upstream compromise
+  # reach CI with no diff in this repository to review.
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Commit ranges and the weekly full sweep both need real history. The
+          # default shallow clone would silently reduce every scan to one commit.
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        id: install
+        run: |
+          set -uo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+
+          # A download failure is an outage, not a finding. Record it and let the
+          # gate decide; do not fail the PR over GitHub Releases being unreachable.
+          if ! curl --fail --silent --show-error --location \
+                    --retry 3 --retry-delay 5 -o "$tarball" "$url"; then
+            echo "::warning::Could not download gitleaks ${GITLEAKS_VERSION} from ${url}"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A checksum mismatch is NOT an outage. It means the bytes we received
+          # are not the bytes we pinned, which is exactly the scenario pinning
+          # exists to detect. This one fails hard.
+          if ! echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum --check --strict; then
+            echo "::error::Checksum mismatch on ${tarball}. Refusing to run an unverified scanner binary."
+            exit 1
+          fi
+
+          # Installed under RUNNER_TEMP and exported via GITHUB_PATH rather than
+          # dropped in /usr/local/bin, so the step never depends on sudo or on
+          # the runner image's directory permissions.
+          bindir="${RUNNER_TEMP}/gitleaks-bin"
+          mkdir -p "$bindir"
+          tar -xzf "$tarball" gitleaks
+          install -m 0755 gitleaks "${bindir}/gitleaks"
+          echo "$bindir" >> "$GITHUB_PATH"
+          "${bindir}/gitleaks" version
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Determine scan scope
+        id: scope
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -uo pipefail
+          case "${{ github.event_name }}" in
+            pull_request)
+              # Resolve the merge base rather than trusting base.sha directly.
+              # base.sha is the base branch tip GitHub recorded for the PR; once
+              # main moves ahead, a raw base..head range also sweeps in commits
+              # that landed on main independently of this PR, and the author
+              # gets blamed for a secret someone else merged.
+              merge_base="$(git merge-base "$PR_BASE_SHA" "$PR_HEAD_SHA")"
+              echo "log_opts=--no-merges ${merge_base}..${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+              echo "label=PR commits (${merge_base:0:7}..${PR_HEAD_SHA:0:7})" >> "$GITHUB_OUTPUT"
+              ;;
+            push)
+              # `before` is all zeros for a new branch, and points at a discarded
+              # commit after a force-push. Either way there is no range to scan,
+              # and an unusable range must widen to full history -- narrowing to
+              # nothing would report a pass having read no commits at all.
+              if [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ] \
+                 || ! git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+                echo "log_opts=" >> "$GITHUB_OUTPUT"
+                echo "label=full history (push range unusable)" >> "$GITHUB_OUTPUT"
+              else
+                echo "log_opts=--no-merges ${PUSH_BEFORE}..${PUSH_AFTER}" >> "$GITHUB_OUTPUT"
+                echo "label=pushed commits (${PUSH_BEFORE:0:7}..${PUSH_AFTER:0:7})" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "log_opts=" >> "$GITHUB_OUTPUT"
+              echo "label=full history" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Scan for secrets
+        id: scan
+        if: steps.install.outputs.ok == 'true'
+        env:
+          LOG_OPTS: ${{ steps.scope.outputs.log_opts }}
+        run: |
+          set -uo pipefail
+          echo "Scope: ${{ steps.scope.outputs.label }}"
+
+          # --exit-code 2 is what makes the gate in the next step possible.
+          # gitleaks exits 1 both when it finds leaks and when it fails to run,
+          # so the default codes cannot distinguish "found a secret" from
+          # "could not scan". Moving findings to 2 leaves 1 meaning only failure.
+          #
+          # --redact keeps matched secrets out of the build log. Logs on a public
+          # repository are world-readable, so an unredacted finding would publish
+          # the credential more widely than the commit did. For the same reason
+          # no SARIF report is written: workflow artifacts are public too.
+          # An empty LOG_OPTS means "scan everything", so the flag is omitted
+          # rather than passed empty. Built as an `if` and not a `&&` one-liner:
+          # a trailing false test is the step's exit status under `set -e`, so
+          # the short form would fail the job on exactly the full-history runs.
+          args=(git . --exit-code 2 --redact --verbose)
+          if [ -n "$LOG_OPTS" ]; then
+            args+=(--log-opts="$LOG_OPTS")
+          fi
+
+          set +e
+          gitleaks "${args[@]}"
+          code=$?
+          set -e
+          echo "code=${code}" >> "$GITHUB_OUTPUT"
+
+      - name: Gate on scan result
+        if: always()
+        env:
+          INSTALL_OK: ${{ steps.install.outputs.ok }}
+          SCAN_CODE: ${{ steps.scan.outputs.code }}
+          SCOPE_LABEL: ${{ steps.scope.outputs.label }}
+        run: |
+          set -uo pipefail
+
+          if [ "$INSTALL_OK" != "true" ]; then
+            echo "::warning::Secret scan did not run -- gitleaks could not be installed. Passing so an upstream outage does not block merges; re-run this job once it clears."
+            echo "### Secret scan: skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "gitleaks could not be downloaded. **No commits were scanned.**" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          case "$SCAN_CODE" in
+            0)
+              echo "No secrets found in ${SCOPE_LABEL}."
+              echo "### Secret scan: clean" >> "$GITHUB_STEP_SUMMARY"
+              echo "Scanned ${SCOPE_LABEL}." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            2)
+              echo "::error::gitleaks found one or more secrets in ${SCOPE_LABEL}. Findings are redacted in the log above."
+              echo "### Secret scan: secrets detected" >> "$GITHUB_STEP_SUMMARY"
+              {
+                echo "Treat every finding as live: **rotate the credential first**, then rewrite it out of the branch."
+                echo "Removing it in a follow-up commit does not help -- the value stays reachable in history."
+                echo "If it is a false positive, allowlist it per the comments in \`.github/workflows/gitleaks.yml\`."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+            126)
+              # Bad flag. Deterministic and self-inflicted, so warn-passing would
+              # disable this check permanently and quietly. Fail and get it fixed.
+              echo "::error::gitleaks rejected a flag (exit 126). This workflow is misconfigured, not merely unavailable."
+              exit 1
+              ;;
+            *)
+              echo "::warning::gitleaks exited ${SCAN_CODE} without completing a scan. Passing so scanner trouble does not block merges -- but no commits were verified."
+              echo "### Secret scan: inconclusive" >> "$GITHUB_STEP_SUMMARY"
+              echo "gitleaks exited \`${SCAN_CODE}\`. **No commits were verified.**" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
