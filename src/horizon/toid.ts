@@ -10,9 +10,21 @@
 
 const LEDGER_SHIFT = 32n;
 
-/** Ledger sequence a paging token belongs to. */
+/**
+ * Ledger sequence a paging token belongs to.
+ *
+ * Two token shapes exist and both appear in Phase 1. Operations, trades and ledgers
+ * use a bare TOID (`19498507278745600`). Effects append an index to disambiguate the
+ * several effects a single operation can produce (`19498507278749697-1`), because the
+ * TOID alone is not unique for them. Parsing the bare form only would throw on every
+ * effect token, which is what the trustlines job reads.
+ */
 export function ledgerOf(pagingToken: string): number {
-  return Number(BigInt(pagingToken) >> LEDGER_SHIFT);
+  const toid = pagingToken.split('-')[0];
+  if (toid === undefined || toid === '' || !/^\d+$/.test(toid)) {
+    throw new RangeError(`Unrecognised Horizon paging token: ${pagingToken}`);
+  }
+  return Number(BigInt(toid) >> LEDGER_SHIFT);
 }
 
 /**

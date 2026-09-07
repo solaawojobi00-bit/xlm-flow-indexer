@@ -13,7 +13,11 @@
  *
  * After a testnet reset, re-run this against a fresh range and update the README:
  *
- *   node scripts/capture-fixtures.ts --from 4539850 --to 4539862
+ *   node scripts/capture-fixtures.ts --job payments   --from 4539850 --to 4539862
+ *   node scripts/capture-fixtures.ts --job trustlines --from 4540630 --to 4540680
+ *
+ * Each job gets its own range because testnet activity is uneven: the range with
+ * payment traffic contains no trustline effects at all, and vice versa.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -24,11 +28,13 @@ import { HorizonClient } from '../src/horizon/client.ts';
 import { openDb } from '../src/db/client.ts';
 import { migrate } from '../src/db/migrate.ts';
 import { ingestPayments } from '../src/ingest/payments.ts';
+import { ingestTrustlines } from '../src/ingest/trustlines.ts';
 
 const DEFAULT_HORIZON = 'https://horizon-testnet.stellar.org';
 const FIXTURE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'test', 'fixtures');
 
 export interface Fixture {
+  readonly job: string;
   readonly capturedAt: string;
   readonly horizonUrl: string;
   readonly networkPassphrase: string;
@@ -39,22 +45,41 @@ export interface Fixture {
   readonly responses: Record<string, unknown>;
 }
 
-function parseArgs(argv: string[]): { from: number; to: number; horizonUrl: string } {
+const JOBS = ['payments', 'trustlines'] as const;
+type JobName = (typeof JOBS)[number];
+
+function isJobName(value: string): value is JobName {
+  return (JOBS as readonly string[]).includes(value);
+}
+
+interface Args {
+  readonly job: JobName;
+  readonly from: number;
+  readonly to: number;
+  readonly horizonUrl: string;
+}
+
+function parseArgs(argv: string[]): Args {
   const get = (flag: string): string | undefined => {
     const i = argv.indexOf(flag);
     return i === -1 ? undefined : argv[i + 1];
   };
 
+  const usage =
+    'Usage: node scripts/capture-fixtures.ts --job <payments|trustlines> --from <ledger> --to <ledger>';
+
+  const job = get('--job') ?? 'payments';
+  if (!isJobName(job)) throw new Error(usage);
+
   const from = Number(get('--from'));
   const to = Number(get('--to'));
-  if (!Number.isInteger(from) || !Number.isInteger(to)) {
-    throw new Error('Usage: node scripts/capture-fixtures.ts --from <ledger> --to <ledger>');
-  }
-  return { from, to, horizonUrl: get('--horizon') ?? DEFAULT_HORIZON };
+  if (!Number.isInteger(from) || !Number.isInteger(to)) throw new Error(usage);
+
+  return { job, from, to, horizonUrl: get('--horizon') ?? DEFAULT_HORIZON };
 }
 
 async function main(argv: string[]): Promise<number> {
-  const { from, to, horizonUrl } = parseArgs(argv);
+  const { job, from, to, horizonUrl } = parseArgs(argv);
 
   const responses: Record<string, unknown> = {};
 
@@ -84,10 +109,15 @@ async function main(argv: string[]): Promise<number> {
   // Ingest into a throwaway in-memory database purely to exercise the real code path.
   const db = openDb(':memory:');
   migrate(db);
-  const result = await ingestPayments(db, client, { fromLedger: from, toLedger: to });
+  const range = { fromLedger: from, toLedger: to };
+  const summary =
+    job === 'payments'
+      ? await ingestPayments(db, client, range)
+      : await ingestTrustlines(db, client, range);
   db.close();
 
   const fixture: Fixture = {
+    job,
     capturedAt: new Date().toISOString(),
     horizonUrl,
     networkPassphrase: meta.network_passphrase,
@@ -97,7 +127,7 @@ async function main(argv: string[]): Promise<number> {
     responses,
   };
 
-  const dir = join(FIXTURE_ROOT, `testnet-${String(from)}-${String(to)}`);
+  const dir = join(FIXTURE_ROOT, `testnet-${job}-${String(from)}-${String(to)}`);
   mkdirSync(dir, { recursive: true });
   // Written minified. The recorded bodies are identical either way, and pretty
   // printing inflates a fixture this size by roughly a third for a diff nobody can
@@ -105,10 +135,15 @@ async function main(argv: string[]): Promise<number> {
   writeFileSync(join(dir, 'horizon.json'), `${JSON.stringify(fixture)}\n`, 'utf8');
 
   console.log(`Captured ${String(Object.keys(responses).length)} responses to ${dir}`);
-  console.log(`  ledgers written:   ${String(result.ledgersWritten)}`);
-  console.log(`  operations scanned:${String(result.operationsScanned)}`);
-  console.log(`  payments written:  ${String(result.paymentsWritten)}`);
+  for (const [key, value] of Object.entries(summary)) {
+    console.log(`  ${key.padEnd(20)} ${String(value)}`);
+  }
   return 0;
 }
 
-process.exit(await main(process.argv.slice(2)));
+// Set the code and let Node exit once handles drain, rather than calling
+// process.exit(). Exiting immediately after async work races libuv's teardown of the
+// still-closing HTTP sockets, which aborts with
+// "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)" on Windows -- after the
+// work has succeeded, so it would present as a spurious failure.
+process.exitCode = await main(process.argv.slice(2));
