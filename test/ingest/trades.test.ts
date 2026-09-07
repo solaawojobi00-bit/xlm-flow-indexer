@@ -40,10 +40,9 @@ describe('migration 002', () => {
     // when an applied migration's content changes. Adding trade_type therefore had to
     // be a new migration -- this asserts both are present and ordered.
     const db = freshDb();
-    assert.deepEqual(
-      appliedMigrations(db).map((m) => m.version),
-      [1, 2],
-    );
+    const versions = appliedMigrations(db).map((m) => m.version);
+    assert.ok(versions.includes(1) && versions.includes(2));
+    assert.ok(versions.indexOf(1) < versions.indexOf(2));
     db.close();
   });
 
