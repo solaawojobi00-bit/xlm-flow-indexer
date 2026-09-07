@@ -252,6 +252,14 @@ npm run format:check
 - [BACKLOG.md](BACKLOG.md) — Phased work breakdown and implementation roadmap.
 - [test/fixtures/README.md](test/fixtures/README.md) — Horizon fixture recording and testnet capture methodology.
 
+---
+
+## Contributing
+
+Issues and pull requests are welcome. See [BACKLOG.md](BACKLOG.md) for the phased roadmap and open work, and [Testing & Quality Assurance](#testing--quality-assurance) for the checks a change is expected to pass before it is submitted.
+
+Participation in this project is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
