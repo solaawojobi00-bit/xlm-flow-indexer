@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { HELP_TEXT, parseCliArgs, runCli } from '../src/cli.ts';
+import { parseCliArgs, runCli } from '../src/cli.ts';
 import { openDb } from '../src/db/client.ts';
 import { appliedMigrations } from '../src/db/migrate.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from './helpers/fixture-server.ts';

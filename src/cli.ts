@@ -47,13 +47,13 @@ Examples:
 
 export type IngestJobName = 'payments' | 'trustlines' | 'trades';
 
-interface ParsedArgs {
-  command?: string;
-  db?: string;
-  from?: number;
-  to?: number;
-  horizon?: string;
-  anchors?: string;
+export interface ParsedArgs {
+  command?: string | undefined;
+  db?: string | undefined;
+  from?: number | undefined;
+  to?: number | undefined;
+  horizon?: string | undefined;
+  anchors?: string | undefined;
   jobs: IngestJobName[];
   help: boolean;
   version: boolean;
@@ -251,7 +251,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
             console.log('\n[trades] Ingesting DEX trades...');
             const res = await ingestTrades(db, client, range);
             console.log(
-              `[trades] Done: ${res.tradesScanned} trades scanned (${res.orderbookTrades} orderbook, ${res.liquidityPoolTrades} pool), ${res.tradesWritten}/${res.tradesSeen} trades written, ${res.ledgersWritten} ledgers.`,
+              `[trades] Done: ${res.tradesSeen} trades seen (${res.orderbookTrades} orderbook, ${res.liquidityPoolTrades} pool), ${res.tradesWritten} trades written, ${res.ledgersWritten} ledgers.`,
             );
           }
         }
@@ -277,7 +277,7 @@ const isMain =
   process.argv[1]?.endsWith('cli.js') ||
   process.argv[1]?.endsWith('xlm-flow-indexer');
 if (isMain) {
-  runCli(process.argv.slice(2)).then((code) => {
+  void runCli(process.argv.slice(2)).then((code) => {
     process.exit(code);
   });
 }
