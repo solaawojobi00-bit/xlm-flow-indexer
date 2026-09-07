@@ -1,0 +1,104 @@
+# Structured bug intake. The fields below exist because freeform reports on this
+# project were reliably missing the three things needed to reproduce: the exact
+# command, the ledger range, and the commit. Each is a required field here.
+name: Bug report
+description: Report incorrect behaviour — bad ingestion, wrong view output, a crash, or a failing command.
+title: '[bug] '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Please check [existing issues](https://github.com/solaawojobi00-bit/xlm-flow-indexer/issues?q=is%3Aissue) first — a duplicate costs you the write-up and us the triage.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What went wrong
+      description: One or two sentences. Save the detail for the fields below.
+      placeholder: Ingesting ledgers 4539850-4539862 records zero trades, but Horizon returns 14 for that range.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the indexer. Best guess is fine — a maintainer applies the matching `area:` label.
+      options:
+        - schema (tables, migrations, indexes)
+        - ingestion (Horizon client, ingestion jobs)
+        - views (analytical SQL views)
+        - cli (command-line entrypoint)
+        - ci (workflows and checks)
+        - docs (README and project docs)
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: >
+        The exact commands, in order, starting from a clean database. Include the ledger range and
+        any `--anchors` file — ingestion behaviour depends on both.
+      value: |
+        1. `npm run migrate -- --db ./repro.db`
+        2. `node src/cli.ts ingest --from  --to  --db ./repro.db`
+        3.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the failing query and its output if this is a schema or view issue.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Commit or ref
+      description: Output of `git rev-parse --short HEAD`. "latest main" is not specific enough to reproduce against.
+      placeholder: 8998acf
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Node version (`node --version`) and OS.
+      placeholder: node v24.14.0, macOS 15.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or stack trace
+      description: Paste the relevant output. This is automatically rendered as code, so no backticks needed.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/solaawojobi00-bit/xlm-flow-indexer/blob/main/CODE_OF_CONDUCT.md).
+          required: true

@@ -1,0 +1,74 @@
+# Feature intake. The "problem" and "non-goals" fields are deliberate: PRD.md draws
+# a firm boundary around what this project is (analytical indexing, not operational
+# parity with Horizon), and most rejected proposals were rejected on that boundary
+# rather than on merit. Asking up front saves a round trip.
+name: Feature request
+description: Propose a new capability — a schema addition, an analytical view, a CLI option, or an ingestion job.
+title: '[feat] '
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please skim [PRD.md](https://github.com/solaawojobi00-bit/xlm-flow-indexer/blob/main/PRD.md) for the project's design goals and non-goals, and [BACKLOG.md](https://github.com/solaawojobi00-bit/xlm-flow-indexer/blob/main/BACKLOG.md) for work already planned.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: The analytical question you cannot answer today, or the workflow that is harder than it should be. Describe the problem, not the solution.
+      placeholder: There is no way to see how much of an asset's volume moved through path payments versus direct payments.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you would add. For a view, sketch the columns and grain; for a CLI change, show the invocation.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Best guess is fine — a maintainer applies the matching `area:` label.
+      options:
+        - schema (tables, migrations, indexes)
+        - ingestion (Horizon client, ingestion jobs)
+        - views (analytical SQL views)
+        - cli (command-line entrypoint)
+        - ci (workflows and checks)
+        - docs (README and project docs)
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including "query the existing tables directly" — if that works but is awkward, say why it is awkward.
+    validations:
+      required: false
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Schema or CLI impact
+      description: >
+        Would this change existing tables, views, or command-line flags in a way that breaks
+        current users? A new migration and a new view are additive; renaming a column is not.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked BACKLOG.md and existing issues, and this is not already planned or filed.
+          required: true
+        - label: I agree to follow this project's [Code of Conduct](https://github.com/solaawojobi00-bit/xlm-flow-indexer/blob/main/CODE_OF_CONDUCT.md).
+          required: true
