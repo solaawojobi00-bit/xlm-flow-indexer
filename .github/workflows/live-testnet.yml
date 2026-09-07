@@ -1,0 +1,70 @@
+name: Live Testnet Verification
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC to verify live Horizon compatibility
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-testnet:
+    name: live-testnet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+
+      - name: Fetch recent ledger range from live testnet
+        id: range
+        run: |
+          latest_ledger=$(curl -s "https://horizon-testnet.stellar.org/ledgers?order=desc&limit=1" | node -e "
+            let data = '';
+            process.stdin.on('data', chunk => data += chunk);
+            process.stdin.on('end', () => {
+              const parsed = JSON.parse(data);
+              const seq = parsed._embedded.records[0].sequence;
+              console.log(seq);
+            });
+          ")
+          from_ledger=$((latest_ledger - 20))
+          to_ledger=$((latest_ledger - 5))
+          echo "from=$from_ledger" >> "$GITHUB_OUTPUT"
+          echo "to=$to_ledger" >> "$GITHUB_OUTPUT"
+          echo "Testing live testnet range: $from_ledger..$to_ledger (latest: $latest_ledger)"
+
+      - name: Apply schema migrations
+        run: node src/cli.ts migrate --db live-testnet.db
+
+      - name: Run live testnet ingestion
+        run: |
+          node src/cli.ts ingest \
+            --from "${{ steps.range.outputs.from }}" \
+            --to "${{ steps.range.outputs.to }}" \
+            --db live-testnet.db \
+            --anchors config/anchors.json
+
+      - name: Query analytical views on live data
+        run: |
+          node -e "
+            import { openDb } from './src/db/client.ts';
+            const db = openDb('live-testnet.db');
+            const views = [
+              'account_flow_daily',
+              'asset_velocity',
+              'anchor_payment_volume',
+              'trade_pair_activity',
+              'top_accounts_by_volume'
+            ];
+            for (const v of views) {
+              const row = db.prepare('SELECT COUNT(*) as count FROM ' + v).get();
+              console.log('View ' + v + ': ' + row.count + ' row(s)');
+            }
+            db.close();
+          "
