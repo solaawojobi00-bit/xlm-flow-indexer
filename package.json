@@ -5,6 +5,9 @@
   "description": "Self-hostable Stellar ledger analytics indexer: Horizon ingestion into SQLite/Postgres with analytical SQL views.",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "xlm-flow-indexer": "./src/cli.ts"
+  },
   "engines": {
     "node": ">=24.0.0"
   },
@@ -12,7 +15,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/**/*.test.ts",
-    "migrate": "node src/cli/migrate.ts",
+    "cli": "node src/cli.ts",
+    "migrate": "node src/cli.ts migrate",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
