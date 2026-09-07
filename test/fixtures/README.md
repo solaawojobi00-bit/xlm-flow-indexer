@@ -58,6 +58,26 @@ distinguishes reading `/effects` from reading `change_trust` operations: an upda
 against an existing line is not an establishment, and a job reading operations would
 record it as one. The suite asserts that asset is absent from `trustlines`.
 
+### `testnet-trades-4534150-4534300/`
+
+| | |
+| --- | --- |
+| Ledger range | 4534150 – 4534300 (151 ledgers) |
+| Trades in range | 12 |
+| `orderbook` | 9 |
+| `liquidity_pool` | **3** |
+| Assets | native, USDC, CETES, SHOAM |
+
+Trades are sparse on testnet — a 200-record sample spanned roughly 30,000 ledgers — so
+this range was picked from the densest 100-ledger bucket found rather than for
+tightness.
+
+It contains both trade mechanisms, which is the point. In a broader sample
+**liquidity-pool trades were 95 of 200**, so a job ingesting only order-book trades
+would discard about half of DEX activity. The `native`/`CETES` pair in this range occurs
+*only* via the pool, so the suite can assert a distinction that would vanish entirely
+if `trade_type` were not recorded.
+
 ## Re-capturing after a testnet reset
 
 When testnet resets, these ranges stop existing and the ingestion tests will fail
@@ -66,10 +86,15 @@ against a fresh capture attempt. Pick new ranges and re-record each job:
 ```
 node scripts/capture-fixtures.ts --job payments   --from <ledger> --to <ledger>
 node scripts/capture-fixtures.ts --job trustlines --from <ledger> --to <ledger>
+node scripts/capture-fixtures.ts --job trades     --from <ledger> --to <ledger>
 ```
 
-A replacement trustlines range needs at least one `trustline_created` and ideally one
-`trustline_updated`, or the distinction above stops being tested.
+Replacement ranges need particular contents, or the tests silently stop covering what
+they were written for:
+
+- **trustlines**: at least one `trustline_created` and ideally one `trustline_updated`.
+- **trades**: both an `orderbook` and a `liquidity_pool` trade.
+- **payments**: at least one native and one issued-asset payment.
 
 The capture is driven by the real ingestion code, so the fixture always contains
 exactly the requests the code makes — a hand-written capture would drift the moment
@@ -89,8 +114,11 @@ deriving them from the fixture would make the tests tautological.
 - **No trustline removal and re-establishment** appears in the trustlines range. The
   policy (earliest `established_at` wins) is asserted against direct inserts rather
   than recorded effects, since no such sequence was available to record.
-- **No `liquidity_pool_trade`** in either range, though one was observed nearby while
-  surveying. Relevant to issue #5, where whether pool trades are in scope is still an
-  open question.
+- **No liquidity-pool identifier is stored.** Pool trades are ingested and tagged
+  `liquidity_pool`, but Horizon's `base_liquidity_pool_id` / `counter_liquidity_pool_id`
+  are not persisted — nothing in Phase 1 or 2 needs pool-level analytics, and the
+  columns would be speculative. Worth knowing that this data is **unrecoverable after a
+  testnet reset**, so if pool identity is ever wanted, capturing it has to happen before
+  then rather than by re-ingesting later.
 
 Worth folding these into a future re-capture if ranges containing them can be found.
