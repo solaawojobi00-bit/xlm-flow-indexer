@@ -7,6 +7,7 @@ import { HorizonClient } from '../../src/horizon/client.ts';
 import type { LedgerRange } from '../../src/ingest/payments.ts';
 import { ingestPayments } from '../../src/ingest/payments.ts';
 import { ingestTrades } from '../../src/ingest/trades.ts';
+import type { TrustlineIngestResult } from '../../src/ingest/trustlines.ts';
 import { ingestTrustlines } from '../../src/ingest/trustlines.ts';
 import {
   loadFixture,
@@ -42,17 +43,78 @@ const paymentsWide = loadFixture('testnet-payments-4539840-4539872');
 const trustlinesFixture = loadFixture('testnet-trustlines-4540630-4540680');
 const tradesFixture = loadFixture('testnet-trades-4534150-4534300');
 
+/**
+ * An account the payments capture writes, and the recorded owner of one trustline.
+ *
+ * Both are real ids from the captures. `SHARED_ACCOUNT` is party to a payment in
+ * [4539850, 4539862]; `RECORDED_TRUSTLINE_OWNER` establishes the COLIBRI trustline in
+ * [4540630, 4540680]. Substituting the former for the latter is what creates the
+ * cross-job contention — see `trustlinesSharingPaymentsAccount` below.
+ */
+const SHARED_ACCOUNT = 'GBTORQK3ZR3RPJF4WTTSH5KVDOAZ4BJI7PD2ECLSBDNHRG4ICNC4JJZV';
+const RECORDED_TRUSTLINE_OWNER = 'GCJOXMQB3D5HT3VTIWLV3OOQ6A6CBVWGLRBVQKUQEDPNMJMHV3ZSBBFZ';
+
+/** The subset of an effects page this file needs to walk in order to rewrite it. */
+interface EffectsPage {
+  readonly _embedded: { readonly records: { account: string; readonly type: string }[] };
+}
+
+/**
+ * The trustlines capture with one `trustline_created` effect reassigned to an account
+ * the payments capture also writes.
+ *
+ * The recorded ranges share no account at all — the payments job writes only accounts
+ * party to a payment-type operation, and none of those appear in the trustlines range.
+ * So the shared-`accounts` contention between two *jobs* cannot be reached by replaying
+ * the captures as recorded, which is exactly why it went uncovered until a live run hit
+ * it (issue #55).
+ *
+ * Rather than hand-author a Horizon response, this derives from the real capture and
+ * changes exactly one field: the `account` on the single COLIBRI `trustline_created`
+ * effect. Asset, issuer, timestamps, paging tokens and the other four effects remain
+ * Horizon's own recorded data, so the ingestion path under test is unchanged.
+ */
+function trustlinesSharingPaymentsAccount(): Fixture {
+  const derived = structuredClone(trustlinesFixture);
+  let rewritten = 0;
+
+  for (const page of Object.values(derived.responses) as EffectsPage[]) {
+    for (const record of page._embedded.records) {
+      if (record.type === 'trustline_created' && record.account === RECORDED_TRUSTLINE_OWNER) {
+        record.account = SHARED_ACCOUNT;
+        rewritten += 1;
+      }
+    }
+  }
+
+  // Guards the derivation itself. If a re-capture ever drops or renames that effect the
+  // substitution would silently no-op, and every assertion below would still pass while
+  // testing the disjoint case again.
+  //
+  // Deliberately raised here at module scope rather than inside `before`. A throw from
+  // inside the hook leaves the fixture servers that did start unclosed, and the runner
+  // then hangs on the open handles instead of reporting the failure.
+  assert.equal(rewritten, 1, 'expected exactly one trustline_created effect to reassign');
+
+  return derived;
+}
+
+const trustlinesOverlap = trustlinesSharingPaymentsAccount();
+
 let narrowServer: FixtureServer;
 let wideServer: FixtureServer;
 let trustlinesServer: FixtureServer;
 let tradesServer: FixtureServer;
+/** Serves the derived capture above, so the trustlines job meets a payments account. */
+let overlapServer: FixtureServer;
 
 before(async () => {
-  [narrowServer, wideServer, trustlinesServer, tradesServer] = await Promise.all([
+  [narrowServer, wideServer, trustlinesServer, tradesServer, overlapServer] = await Promise.all([
     startFixtureServer(paymentsNarrow),
     startFixtureServer(paymentsWide),
     startFixtureServer(trustlinesFixture),
     startFixtureServer(tradesFixture),
+    startFixtureServer(trustlinesOverlap),
   ]);
 });
 
@@ -62,6 +124,7 @@ after(async () => {
     wideServer.close(),
     trustlinesServer.close(),
     tradesServer.close(),
+    overlapServer.close(),
   ]);
 });
 
@@ -106,6 +169,21 @@ function counts(db: Db): Record<string, number> {
     result[table] = (db.prepare(`SELECT COUNT(*) v FROM ${table}`).get() as { v: number }).v;
   }
   return result;
+}
+
+/**
+ * How many `accounts` rows carry the id two jobs contend over.
+ *
+ * Asserted alongside the total account count because the two catch different faults: a
+ * duplicated shared row inflates the total, whereas a parent insert wrongly skipped
+ * leaves the total correct and this at zero.
+ */
+function sharedAccountRows(db: Db): number {
+  return (
+    db.prepare('SELECT COUNT(*) v FROM accounts WHERE account_id = ?').get(SHARED_ACCOUNT) as {
+      v: number;
+    }
+  ).v;
 }
 
 /** Full contents of every table, primary-key ordered — the canonical database state. */
@@ -385,6 +463,175 @@ describe('shared parent rows', () => {
     await ingestAll(db, ['trades', 'trustlines', 'payments']);
 
     assert.deepEqual(db.pragma('foreign_key_check'), []);
+  });
+});
+
+describe('cross-job shared parent contention', () => {
+  /**
+   * Two *jobs* writing the same `accounts` row on the same database (issue #55).
+   *
+   * The `shared parent rows` suite above sets its contention up with a direct INSERT,
+   * which proves the conflict clause fires but says nothing about how the jobs behave
+   * against each other. A live-testnet run surfaced the real case: the payments job had
+   * already written an account the trustlines job then also touched, producing
+   * "[trustlines] 1/1 trustlines written, 0 accounts" — correct, but reached by accident
+   * rather than by any test.
+   *
+   * The distinguishing property is that the *totals* are order-independent while each
+   * job's own `accountsWritten` is not: whichever job runs second reports one fewer
+   * account, because the row was already there. A test asserting only the totals would
+   * pass even if a job miscounted its own writes.
+   */
+  const runTrustlinesOverlapping = (db: Db): Promise<TrustlineIngestResult> =>
+    ingestTrustlines(db, clientFor(overlapServer), rangeOf(trustlinesFixture));
+
+  /**
+   * One account fewer than `EXPECTED_COUNTS`, which is the whole point: the payments
+   * range contributes 4 accounts and the trustlines range 5, but one is now common to
+   * both, so the union is 8 rather than 9.
+   */
+  const OVERLAP_EXPECTED_COUNTS = {
+    ledgers: 164,
+    accounts: 8,
+    operations: 8,
+    payments: 8,
+    trustlines: 5,
+    trades: 12,
+  } as const;
+
+  it('attributes the shared account to payments when payments runs first', async () => {
+    const db = freshDb();
+
+    const payments = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    const trustlines = await runTrustlinesOverlapping(db);
+
+    assert.equal(payments.accountsWritten, 4, 'payments inserts all four of its accounts');
+    assert.equal(
+      trustlines.accountsWritten,
+      4,
+      'trustlines touches five accounts but one was already written by payments',
+    );
+    assert.equal(
+      trustlines.trustlinesWritten,
+      5,
+      'every trustline must still be written — the shared parent must not suppress the child',
+    );
+    assert.equal(trustlines.trustlinesSeen, 5);
+
+    assert.equal(counts(db).accounts, 8, 'the shared account must not be duplicated');
+    assert.equal(sharedAccountRows(db), 1);
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+  });
+
+  it('attributes the shared account to trustlines when trustlines runs first', async () => {
+    const db = freshDb();
+
+    const trustlines = await runTrustlinesOverlapping(db);
+    const payments = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+
+    // The mirror image of the case above: the same shared row, credited to the other
+    // job. This is the assertion that would catch an upsert whose accounting depended on
+    // which job happened to run first.
+    assert.equal(trustlines.accountsWritten, 5, 'trustlines inserts all five of its accounts');
+    assert.equal(
+      payments.accountsWritten,
+      3,
+      'payments touches four accounts but one was already written by trustlines',
+    );
+    assert.equal(payments.paymentsWritten, 8, 'every payment must still be written');
+    assert.equal(payments.operationsWritten, 8);
+
+    assert.equal(counts(db).accounts, 8);
+    assert.equal(sharedAccountRows(db), 1);
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+  });
+
+  it('converges on identical state whichever job wrote the shared account first', async () => {
+    const paymentsFirst = freshDb();
+    await ingestPayments(paymentsFirst, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    await runTrustlinesOverlapping(paymentsFirst);
+
+    const trustlinesFirst = freshDb();
+    await runTrustlinesOverlapping(trustlinesFirst);
+    await ingestPayments(trustlinesFirst, clientFor(narrowServer), rangeOf(paymentsNarrow));
+
+    // Write counts differ between these two runs, as asserted above. The resulting rows
+    // must not.
+    assert.equal(snapshot(paymentsFirst), snapshot(trustlinesFirst));
+  });
+
+  it('is a no-op when the contending jobs are re-run', async () => {
+    // The shared row is the one most likely to be rewritten on a second pass, since two
+    // separate writers both claim it.
+    const db = freshDb();
+    await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    await runTrustlinesOverlapping(db);
+    const baseline = snapshot(db);
+
+    const payments = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    const trustlines = await runTrustlinesOverlapping(db);
+
+    assert.equal(payments.accountsWritten, 0);
+    assert.equal(trustlines.accountsWritten, 0);
+    assert.equal(trustlines.trustlinesWritten, 0);
+    assert.equal(snapshot(db), baseline);
+    assert.equal(sharedAccountRows(db), 1);
+  });
+
+  it('converges for every execution order with the shared account present', async () => {
+    /**
+     * The same permutation set as `job order independence`, but with the contention in
+     * play. That suite runs against captures whose accounts are disjoint, so no ordering
+     * it tries ever makes one job meet another's `accounts` row.
+     *
+     * The trades job is included even though it writes no accounts, because it does write
+     * `ledgers` alongside the payments job — so these orderings exercise both shared
+     * parent tables at once.
+     */
+    const PERMUTATIONS: readonly (readonly JobName[])[] = [
+      ['payments', 'trustlines', 'trades'],
+      ['payments', 'trades', 'trustlines'],
+      ['trustlines', 'payments', 'trades'],
+      ['trustlines', 'trades', 'payments'],
+      ['trades', 'payments', 'trustlines'],
+      ['trades', 'trustlines', 'payments'],
+    ];
+
+    const OVERLAPPING_JOBS: Record<JobName, (db: Db) => Promise<unknown>> = {
+      payments: runPayments,
+      trustlines: runTrustlinesOverlapping,
+      trades: runTrades,
+    };
+
+    let reference: string | undefined;
+    let referenceOrder = '';
+
+    for (const order of PERMUTATIONS) {
+      const db = freshDb();
+      for (const name of order) {
+        await OVERLAPPING_JOBS[name](db);
+      }
+
+      assert.deepEqual(
+        counts(db),
+        OVERLAP_EXPECTED_COUNTS,
+        `counts differ for order ${order.join(' → ')}`,
+      );
+      assert.equal(sharedAccountRows(db), 1, `shared account duplicated for ${order.join(' → ')}`);
+      assert.deepEqual(db.pragma('foreign_key_check'), [], `broken FK for ${order.join(' → ')}`);
+
+      const state = snapshot(db);
+      if (reference === undefined) {
+        reference = state;
+        referenceOrder = order.join(' → ');
+      } else {
+        assert.equal(
+          state,
+          reference,
+          `order ${order.join(' → ')} diverged from ${referenceOrder}`,
+        );
+      }
+    }
   });
 });
 
