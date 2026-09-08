@@ -1,0 +1,102 @@
+version: 2
+
+# Automated dependency update PRs for the npm ecosystem.
+#
+# ---------------------------------------------------------------------------
+# Why the grouping is configured before the first PR lands
+# ---------------------------------------------------------------------------
+# An ungrouped Dependabot config opens one PR per package. For most of this
+# manifest that is what you want -- a lone `prettier` bump is easy to read and
+# easy to revert. It fails badly for packages that are version-coupled to each
+# other, because the individual PRs cannot go green on their own:
+#
+#   - `eslint`, `@eslint/js`, and `typescript-eslint` move together. The
+#     typescript-eslint packages declare a peer range on eslint, so bumping
+#     eslint alone leaves an unsatisfied peer, and bumping typescript-eslint
+#     alone does the same in reverse. Each PR fails `npm run lint`, both sit
+#     there red, and the fix is to merge them in an order Dependabot never
+#     proposed.
+#
+#   - `@types/*` packages have no peer edges, but they share a review: they are
+#     all type-only, they all land in the same `npm run typecheck` run, and a
+#     type error introduced by one is indistinguishable from a type error
+#     introduced by another when they arrive as separate PRs on the same day.
+#
+# The sibling netpulse-xlm repository ran without these groups and hit exactly
+# that fragmentation: a stack of individually-red lint PRs that had to be
+# closed and redone by hand. Grouping is set up here before the first batch
+# opens, because retrofitting it means triaging that stack first.
+
+updates:
+  - package-ecosystem: npm
+    directory: '/'
+
+    schedule:
+      interval: weekly
+      day: monday
+      # After the 04:17 UTC weekly full-history secret sweep in
+      # gitleaks.yml. If a scheduled scan is going to flag something in
+      # main, that should surface before a fresh batch of dependency PRs
+      # is competing for the same attention.
+      time: '06:00'
+      timezone: Etc/UTC
+
+    # Grouped runs mean a normal week is 2-4 PRs, not 8. The cap is here so a
+    # long-untended stretch cannot open an unbounded queue -- ungrouped
+    # stragglers wait for the next run instead.
+    open-pull-requests-limit: 5
+
+    # Dependabot's default subject line ("Bump x from a to b") does not match
+    # the conventional-commit style used elsewhere in this history. `include:
+    # scope` yields `chore(deps): ...` for runtime dependencies and
+    # `chore(deps-dev): ...` for devDependencies.
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+
+    # Dependabot creates and applies a `dependencies` label by default, which
+    # would sit outside the `area:` / `effort:` taxonomy the rest of the
+    # tracker uses. Naming the label explicitly keeps that taxonomy intact.
+    labels:
+      - 'area:hygiene'
+
+    # Groups are evaluated in the order written, and the first matching group
+    # claims the dependency. Patterns are exact names unless they contain a
+    # glob.
+    groups:
+      # Deliberately three exact names rather than `typescript*`. That glob
+      # would also match `typescript` itself and pull the compiler into this
+      # group -- where a grouped bump could carry a TypeScript major past the
+      # ignore rule below, which is the one thing that rule exists to prevent.
+      eslint-toolchain:
+        patterns:
+          - 'eslint'
+          - '@eslint/js'
+          - 'typescript-eslint'
+
+      types:
+        patterns:
+          - '@types/*'
+
+    ignore:
+      # TypeScript 5.x -> 7.x is the typescript-go rewrite, not a routine
+      # major. It changes the compiler implementation, and the migration needs
+      # to be done deliberately with the test suite and `npm run build` driving
+      # it -- not reviewed as an automated PR that happens to be red.
+      #
+      # Note that this is silent: Dependabot will not open a PR, comment, or
+      # otherwise report that a new major exists. Check with
+      # `npm outdated typescript` when picking up that migration, and delete
+      # this entry as part of it rather than merging around it.
+      #
+      # Minor and patch updates within 5.x are unaffected and still arrive
+      # weekly.
+      - dependency-name: 'typescript'
+        update-types:
+          - 'version-update:semver-major'
+
+# Auto-merge is deliberately not configured here. It belongs in a separate
+# change, once these groups have produced a few cycles of PRs that go green
+# without hand-holding. Enabling it now would automate a grouping strategy
+# that has not yet been observed working.
