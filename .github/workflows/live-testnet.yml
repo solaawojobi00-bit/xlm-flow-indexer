@@ -43,18 +43,34 @@ jobs:
         run: node src/cli.ts migrate --db live-testnet.db
 
       - name: Run live testnet ingestion
+        id: ingest
         run: |
+          set -o pipefail
           node src/cli.ts ingest \
             --from "${{ steps.range.outputs.from }}" \
             --to "${{ steps.range.outputs.to }}" \
             --db live-testnet.db \
-            --anchors config/anchors.json
+            --anchors config/anchors.json | tee ingest.log
+
+          # The payments job reports "[payments] Done: <n> ops scanned, ...".
+          # Horizon legitimately returns nothing for a narrow testnet range, so a
+          # missing or zero figure is a skip signal for the view assertions below,
+          # not a failure.
+          ops_scanned=$(sed -n 's/^\[payments\] Done: \([0-9][0-9]*\) ops scanned.*/\1/p' ingest.log | head -1)
+          echo "ops_scanned=${ops_scanned:-0}" >> "$GITHUB_OUTPUT"
+          echo "Operations scanned from Horizon this run: ${ops_scanned:-0}"
 
       - name: Query analytical views on live data
+        env:
+          OPS_SCANNED: ${{ steps.ingest.outputs.ops_scanned }}
         run: |
           node -e "
             import { openDb } from './src/db/client.ts';
+
+            const opsScanned = Number(process.env.OPS_SCANNED ?? '0');
             const db = openDb('live-testnet.db');
+            const count = (rel) => db.prepare('SELECT COUNT(*) AS count FROM ' + rel).get().count;
+
             const views = [
               'account_flow_daily',
               'asset_velocity',
@@ -62,9 +78,58 @@ jobs:
               'trade_pair_activity',
               'top_accounts_by_volume'
             ];
+
+            // Diagnostic output, kept for visibility regardless of assertion outcome.
+            const rows = {};
             for (const v of views) {
-              const row = db.prepare('SELECT COUNT(*) as count FROM ' + v).get();
-              console.log('View ' + v + ': ' + row.count + ' row(s)');
+              rows[v] = count(v);
+              console.log('View ' + v + ': ' + rows[v] + ' row(s)');
             }
+
+            if (opsScanned === 0) {
+              console.log('');
+              console.log('Horizon returned 0 operations for this ledger range, so no view is');
+              console.log('expected to hold rows. Skipping view assertions for this run.');
+              db.close();
+              process.exit(0);
+            }
+
+            // Base-table counts gate the assertions. The DB is created fresh each run,
+            // so these are exactly what this run ingested.
+            const payments = count('payments');
+            const trades = count('trades');
+            console.log('');
+            console.log('Ingested this run: ' + opsScanned + ' ops scanned, ' + payments + ' payment(s), ' + trades + ' trade(s).');
+
+            // A view over a non-empty base table must return rows. If it does not, the
+            // view is broken (bad JOIN, or a column renamed by a Horizon response-shape
+            // change) rather than merely seeing a quiet day on testnet.
+            const assertions = [
+              ...(payments > 0
+                ? ['account_flow_daily', 'asset_velocity', 'top_accounts_by_volume']
+                : []),
+              ...(trades > 0 ? ['trade_pair_activity'] : [])
+            ];
+
+            const broken = assertions.filter((v) => rows[v] === 0);
+            for (const v of broken) {
+              console.error('::error::View ' + v + ' returned 0 rows despite non-empty base tables (' + payments + ' payment(s), ' + trades + ' trade(s)). The view is broken, not idle.');
+            }
+
+            // anchor_payment_volume is intentionally never asserted: it additionally joins
+            // anchor_issuers, so it is legitimately empty whenever no ingested payment used
+            // an asset from the configured anchor list. trade_pair_activity is asserted only
+            // when trades were actually written, for the same reason.
+            if (payments === 0 && trades === 0) {
+              console.log('');
+              console.log('Ops were scanned but no payments or trades were written (none of the');
+              console.log('scanned operations were of an indexed type). Skipping view assertions.');
+            } else {
+              console.log('');
+              console.log('Asserted non-empty: ' + assertions.join(', ') + '.');
+              console.log('Not asserted (legitimately empty): ' + views.filter((v) => !assertions.includes(v)).join(', ') + '.');
+            }
+
             db.close();
+            if (broken.length > 0) process.exit(1);
           "
