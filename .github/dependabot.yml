@@ -96,6 +96,31 @@ updates:
         update-types:
           - 'version-update:semver-major'
 
+      # `@types/node` majors track Node's own release lines, so the major here
+      # is not a routine version number -- it is a claim about which runtime
+      # the type checker is describing. `.nvmrc` pins 24.20.0 and the
+      # `toolchain` job in ci.yml fails the build if the runtime drifts from
+      # that pin, so allowing 26.x would let `tsc` accept APIs that do not
+      # exist at runtime.
+      #
+      # That failure mode is the dangerous kind: `npm run typecheck` passes,
+      # `npm run lint` passes, CI is green across every job, and the error
+      # arrives on Node 24 as `TypeError: ... is not a function`. A green
+      # typecheck then means the opposite of what it appears to mean, which is
+      # worse than having no types for the API at all.
+      #
+      # This is pinned *to `.nvmrc`* -- not pinned because a bump was broken.
+      # Raise it in the same change that raises the Node pin, never on its
+      # own. Like the `typescript` entry above this is silent, so check with
+      # `npm outdated @types/node` when doing that migration.
+      #
+      # Minor and patch updates within 24.x still arrive weekly. An ignore
+      # rule applies to a dependency inside a group, so the `types` group
+      # above continues to batch the bumps that are still offered.
+      - dependency-name: '@types/node'
+        update-types:
+          - 'version-update:semver-major'
+
 # Auto-merge is deliberately not configured here. It belongs in a separate
 # change, once these groups have produced a few cycles of PRs that go green
 # without hand-holding. Enabling it now would automate a grouping strategy
