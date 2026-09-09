@@ -1,6 +1,6 @@
 version: 2
 
-# Automated dependency update PRs for the npm ecosystem.
+# Automated dependency update PRs for the npm and github-actions ecosystems.
 #
 # ---------------------------------------------------------------------------
 # Why the grouping is configured before the first PR lands
@@ -120,6 +120,70 @@ updates:
       - dependency-name: '@types/node'
         update-types:
           - 'version-update:semver-major'
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions
+  # ---------------------------------------------------------------------------
+  # Before this entry the actions pinned across the workflows were the only
+  # dependencies in the repository with no update path at all. That matters
+  # more than a normal dependency gap, because these actions *are* the security
+  # and correctness gates: a stale `github/codeql-action` runs older analysis
+  # queries, and the scheduled scan in codeql.yml exists specifically to
+  # re-analyse unchanged code against rules that did not exist when it merged.
+  # That premise only holds if the action itself is current.
+  - package-ecosystem: github-actions
+
+    # `/` is correct and is not a typo for `.github/workflows`. Dependabot
+    # resolves workflow files relative to the repository root for this
+    # ecosystem, and pointing it at the workflows directory finds nothing.
+    directory: '/'
+
+    schedule:
+      interval: weekly
+      day: monday
+      # Half an hour after the npm batch rather than the same minute, so the
+      # two arrive as separable batches to review instead of one pile.
+      time: '06:30'
+      timezone: Etc/UTC
+
+    open-pull-requests-limit: 3
+
+    commit-message:
+      prefix: chore
+      include: scope
+
+    labels:
+      - 'area:ci'
+      - 'area:hygiene'
+
+    groups:
+      # `actions/checkout` appears at 9 call sites across all four workflows
+      # and `actions/setup-node` at 7 across two, so an ungrouped config would
+      # open a PR per action while touching overlapping files. One grouped PR
+      # is reviewable; several that each edit ci.yml are churn.
+      actions-toolchain:
+        patterns:
+          - 'actions/*'
+
+      # Deliberately its own group rather than folded into the plumbing above.
+      # CodeQL is a scanner, not plumbing: a bump can change which findings
+      # the analysis reports, and that is worth reading on its own terms
+      # instead of alongside a `checkout` patch. The glob covers the `/init`
+      # and `/analyze` sub-actions, which are versioned together as one repo.
+      codeql:
+        patterns:
+          - 'github/codeql-action*'
+
+    # No ignore rule, deliberately -- majors are allowed through here.
+    #
+    # This is the opposite call to the `typescript` and `@types/node` holds
+    # above, and the difference is whether a bad bump is visible. Those two are
+    # held because their failure is silent: the wrong `@types/node` leaves
+    # every check green and fails at runtime. An action major that breaks the
+    # build fails loudly, in the PR that proposes it, before it can merge --
+    # these workflows are the very thing that would catch it. Copying the
+    # ignore precedent by reflex would suppress the only updates that keep the
+    # security gates current, for no gain in safety.
 
 # Auto-merge is deliberately not configured here. It belongs in a separate
 # change, once these groups have produced a few cycles of PRs that go green
