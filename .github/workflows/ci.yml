@@ -126,3 +126,67 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+
+  # The Postgres half of the dual-dialect schema (issue #48).
+  #
+  # Kept as its own job rather than folded into `test`, because it is the only
+  # job needing a service container and because a Postgres failure should be
+  # distinguishable at a glance from a SQLite one. The suites in
+  # test/postgres.test.ts skip themselves when DATABASE_URL is unset, so the
+  # `test` job above stays engine-independent and contributors without a local
+  # Postgres are unaffected.
+  #
+  # NOTE: this job name is not yet a required status check. Branch protection
+  # (#54) requires the six names that existed when it was configured; adding
+  # this one to the required set is a repo Settings change.
+  postgres:
+    name: postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to a major. The schema translation targets standard NUMERIC and
+        # TIMESTAMPTZ behaviour, so a minor bump is not expected to matter, but
+        # a silently floating major would make this job's result unreproducible.
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: xlm_flow_indexer
+        ports:
+          - 5432:5432
+        # Without the health check the steps below race the server's startup and
+        # fail on connection refused rather than on anything real.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/xlm_flow_indexer
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+
+      - name: Migrations apply cleanly from empty
+        run: npm run migrate -- --postgres "$DATABASE_URL"
+
+      - name: Re-running migrations is a no-op
+        run: |
+          output=$(npm run migrate --silent -- --postgres "$DATABASE_URL")
+          echo "$output"
+          if [ "$output" != "No pending migrations." ]; then
+            echo "::error::Second migrate run was not a no-op. Migrations must be idempotent."
+            exit 1
+          fi
+
+      # Asserts the translated types and the issue #1 constraints against the
+      # real engine, which is the part that cannot be checked without a server.
+      - name: Postgres schema and constraint suite
+        run: node --test test/postgres.test.ts

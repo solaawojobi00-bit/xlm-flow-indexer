@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { loadAnchorIssuers } from './db/anchors.ts';
 import { openDb } from './db/client.ts';
 import { migrate } from './db/migrate.ts';
+import { migratePostgres } from './db/postgres.ts';
 import { HorizonClient } from './horizon/client.ts';
 import { ingestPayments } from './ingest/payments.ts';
 import { ingestTrades } from './ingest/trades.ts';
@@ -25,7 +26,11 @@ Global Options:
 
 Command: migrate
   Options:
-    --db <path>           Path to the SQLite database file (required)
+    --db <path>           Path to the SQLite database file (required unless --postgres)
+    --postgres <url>      Apply to a Postgres database instead, e.g.
+                          postgres://user:pass@host:5432/dbname
+                          The same migration files are used for both engines;
+                          amounts become NUMERIC and timestamps TIMESTAMPTZ.
 
 Command: ingest
   Options:
@@ -41,6 +46,7 @@ Command: ingest
 
 Examples:
   xlm-flow-indexer migrate --db ./indexer.db
+  xlm-flow-indexer migrate --postgres postgres://localhost:5432/xlm
   xlm-flow-indexer ingest --from 4539850 --to 4539862 --db ./indexer.db
   xlm-flow-indexer ingest --from 4539850 --to 4539862 --db ./indexer.db --jobs payments,trades
 `;
@@ -50,6 +56,7 @@ export type IngestJobName = 'payments' | 'trustlines' | 'trades';
 export interface ParsedArgs {
   command?: string | undefined;
   db?: string | undefined;
+  postgres?: string | undefined;
   from?: number | undefined;
   to?: number | undefined;
   horizon?: string | undefined;
@@ -62,6 +69,7 @@ export interface ParsedArgs {
 export function parseCliArgs(args: readonly string[]): ParsedArgs {
   let command: string | undefined;
   let db: string | undefined;
+  let postgres: string | undefined;
   let from: number | undefined;
   let to: number | undefined;
   let horizon: string | undefined;
@@ -87,6 +95,10 @@ export function parseCliArgs(args: readonly string[]): ParsedArgs {
       db = args[++i];
     } else if (arg.startsWith('--db=')) {
       db = arg.slice(5);
+    } else if (arg === '--postgres') {
+      postgres = args[++i];
+    } else if (arg.startsWith('--postgres=')) {
+      postgres = arg.slice(11);
     } else if (arg === '--from') {
       const val = args[++i];
       from = val !== undefined ? Number(val) : NaN;
@@ -132,7 +144,41 @@ export function parseCliArgs(args: readonly string[]): ParsedArgs {
       ? Array.from(new Set(specificJobs))
       : ['payments', 'trustlines', 'trades'];
 
-  return { command, db, from, to, horizon, anchors, jobs, help, version };
+  return { command, db, postgres, from, to, horizon, anchors, jobs, help, version };
+}
+
+/**
+ * Apply migrations to Postgres.
+ *
+ * `pg` is imported dynamically so the SQLite path -- which is every current
+ * command other than this one -- does not pay to load a driver it never uses,
+ * and so a SQLite-only deployment is unaffected if the driver is absent.
+ */
+async function migrateToPostgres(connectionString: string): Promise<number> {
+  const { Client } = await import('pg');
+  const client = new Client({ connectionString });
+
+  try {
+    await client.connect();
+  } catch (err) {
+    console.error(`Migration failed: could not connect to Postgres: ${(err as Error).message}`);
+    return 1;
+  }
+
+  try {
+    const applied = await migratePostgres(client);
+    if (applied.length === 0) {
+      console.log('No pending migrations.');
+    } else {
+      console.log(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`Migration failed: ${(err as Error).message}`);
+    return 1;
+  } finally {
+    await client.end();
+  }
 }
 
 export async function runCli(argv: readonly string[]): Promise<number> {
@@ -155,6 +201,14 @@ export async function runCli(argv: readonly string[]): Promise<number> {
   }
 
   if (parsed.command === 'migrate') {
+    if (parsed.postgres) {
+      if (parsed.db) {
+        console.error('Error: Pass either --db or --postgres, not both.');
+        return 1;
+      }
+      return await migrateToPostgres(parsed.postgres);
+    }
+
     if (!parsed.db) {
       console.error('Error: Missing required argument --db <path>');
       return 1;

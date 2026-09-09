@@ -26,7 +26,7 @@
 
 CREATE TABLE ledgers (
   sequence          INTEGER PRIMARY KEY,
-  closed_at         TEXT    NOT NULL,
+  closed_at         ${timestampType}    NOT NULL,
   operation_count   INTEGER NOT NULL
 );
 
@@ -39,7 +39,7 @@ CREATE TABLE operations (
   ledger_sequence   INTEGER NOT NULL REFERENCES ledgers(sequence),
   type              TEXT    NOT NULL,
   source_account    TEXT    NOT NULL REFERENCES accounts(account_id),
-  created_at        TEXT    NOT NULL
+  created_at        ${timestampType}    NOT NULL
 );
 
 CREATE TABLE payments (
@@ -49,7 +49,7 @@ CREATE TABLE payments (
   asset_code        TEXT NOT NULL,
   -- '' for native, never NULL. See header note 1.
   asset_issuer      TEXT NOT NULL DEFAULT '',
-  amount            TEXT NOT NULL
+  amount            ${amountType} NOT NULL
 );
 
 CREATE TABLE trustlines (
@@ -58,7 +58,7 @@ CREATE TABLE trustlines (
   -- '' for native, never NULL. This column is part of the primary key, which is
   -- precisely why it cannot be nullable. See header note 1.
   asset_issuer      TEXT NOT NULL DEFAULT '',
-  established_at    TEXT NOT NULL,
+  established_at    ${timestampType} NOT NULL,
   PRIMARY KEY (account_id, asset_code, asset_issuer)
 );
 
@@ -70,9 +70,9 @@ CREATE TABLE trades (
   base_asset_issuer     TEXT NOT NULL DEFAULT '',
   counter_asset_code    TEXT NOT NULL,
   counter_asset_issuer  TEXT NOT NULL DEFAULT '',
-  base_amount           TEXT NOT NULL,
-  counter_amount        TEXT NOT NULL,
-  executed_at           TEXT NOT NULL
+  base_amount           ${amountType} NOT NULL,
+  counter_amount        ${amountType} NOT NULL,
+  executed_at           ${timestampType} NOT NULL
 );
 
 -- Phase 1 indexes, per ARCHITECTURE.md. Issue #15 revisits these against the
