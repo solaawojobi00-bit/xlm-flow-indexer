@@ -29,7 +29,7 @@ WITH normalised_trades AS (
   SELECT
     id,
     trade_type,
-    date(executed_at) AS day,
+    ${day(executed_at)} AS day,
     CASE
       WHEN (base_asset_code || ':' || base_asset_issuer) <= (counter_asset_code || ':' || counter_asset_issuer)
       THEN base_asset_code
@@ -52,13 +52,13 @@ WITH normalised_trades AS (
     END AS asset_b_issuer,
     CASE
       WHEN (base_asset_code || ':' || base_asset_issuer) <= (counter_asset_code || ':' || counter_asset_issuer)
-      THEN CAST(base_amount AS REAL)
-      ELSE CAST(counter_amount AS REAL)
+      THEN ${amount(base_amount)}
+      ELSE ${amount(counter_amount)}
     END AS asset_a_amount,
     CASE
       WHEN (base_asset_code || ':' || base_asset_issuer) <= (counter_asset_code || ':' || counter_asset_issuer)
-      THEN CAST(counter_amount AS REAL)
-      ELSE CAST(base_amount AS REAL)
+      THEN ${amount(counter_amount)}
+      ELSE ${amount(base_amount)}
     END AS asset_b_amount
   FROM trades
 )

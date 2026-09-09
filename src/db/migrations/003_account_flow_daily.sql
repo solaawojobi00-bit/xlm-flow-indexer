@@ -28,9 +28,9 @@ WITH flow_legs AS (
     p.from_account AS account_id,
     p.asset_code,
     p.asset_issuer,
-    date(o.created_at) AS day,
+    ${day(o.created_at)} AS day,
     0.0 AS inbound,
-    CAST(p.amount AS REAL) AS outbound
+    ${amount(p.amount)} AS outbound
   FROM payments p
   JOIN operations o ON p.operation_id = o.id
 
@@ -41,8 +41,8 @@ WITH flow_legs AS (
     p.to_account AS account_id,
     p.asset_code,
     p.asset_issuer,
-    date(o.created_at) AS day,
-    CAST(p.amount AS REAL) AS inbound,
+    ${day(o.created_at)} AS day,
+    ${amount(p.amount)} AS inbound,
     0.0 AS outbound
   FROM payments p
   JOIN operations o ON p.operation_id = o.id

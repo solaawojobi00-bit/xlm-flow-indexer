@@ -27,11 +27,11 @@ CREATE VIEW asset_velocity AS
 SELECT
   p.asset_code,
   p.asset_issuer,
-  date(o.created_at) AS day,
+  ${day(o.created_at)} AS day,
   COUNT(p.operation_id) AS transfer_count,
-  SUM(CAST(p.amount AS REAL)) AS total_volume,
+  SUM(${amount(p.amount)}) AS total_volume,
   COUNT(DISTINCT p.from_account) AS distinct_senders,
   COUNT(DISTINCT p.to_account) AS distinct_receivers
 FROM payments p
 JOIN operations o ON p.operation_id = o.id
-GROUP BY p.asset_code, p.asset_issuer, date(o.created_at);
+GROUP BY p.asset_code, p.asset_issuer, ${day(o.created_at)};

@@ -27,10 +27,39 @@ Here the Postgres migration isn't optional deferred work — it's Phase 2 by
 design, because ledger history only grows and analytical queries get
 expensive over normalized data at scale.
 
-## Schema (Phase 1, SQLite-compatible)
+## Schema (dual-dialect: SQLite and Postgres)
 
 Normalized "raw" tables mirror Horizon's operation/effect model closely
 enough to ingest directly, then a small set of analytical views sit on top.
+
+One set of numbered migration files in `src/db/migrations/` serves both
+engines. Where the dialects genuinely differ the file carries a `${...}` token
+that `src/db/dialect.ts` expands per engine, so there is no SQLite copy and
+Postgres copy to drift apart. Four tokens exist, because only four things
+differ:
+
+| Token | SQLite | Postgres |
+| --- | --- | --- |
+| `${amountType}` | `TEXT` | `NUMERIC(19, 7)` |
+| `${timestampType}` | `TEXT` | `TIMESTAMPTZ` |
+| `${day(expr)}` | `date(expr)` | `(expr)::date` |
+| `${amount(expr)}` | `CAST(expr AS REAL)` | `expr` |
+
+Everything else — `TEXT` account ids, `INTEGER` ledger sequences, `||`
+concatenation, `UNION ALL`, `WITH`, the aggregate functions — is portable SQL
+and is written plainly.
+
+`NUMERIC(19, 7)` is not arbitrary: a Stellar amount is an int64 count of
+stroops at 1e-7, so the largest representable value is `922337203685.4775807`
+— twelve integer digits and seven fractional. That is the precision the
+protocol can produce, so it is the precision the column declares. The
+`${amount(...)}` token exists because SQLite has to cast a TEXT column to
+aggregate it, whereas in Postgres the column is already NUMERIC and casting
+would round-trip an exact decimal through a float — the exact loss the
+translation is meant to prevent.
+
+The SQL block below is the **SQLite** rendering; substitute the table above for
+the Postgres one.
 
 ```sql
 CREATE TABLE ledgers (
@@ -97,6 +126,15 @@ insert errors outright. Encoding native as `NULL` would therefore let Phase 1
 silently accumulate duplicates that the Phase 2 migration parity check rejects,
 with the two backends disagreeing about whether the data was ever valid.
 
+Now that both dialects are implemented, the consequence is worth stating
+precisely. On `trustlines.asset_issuer` — a primary key column — the explicit
+`NOT NULL` is **redundant in Postgres and load-bearing in SQLite**. It is kept
+because one schema serves both engines and it is harmless in the one that does
+not need it. On `payments.asset_issuer` and the two `trades` issuer columns it
+is not redundant in either engine, because those columns are not part of a
+primary key. Both halves are asserted against a live Postgres in
+`test/postgres.test.ts`, not just against the DDL text.
+
 Using `''` consistently in `payments`, `trustlines` and `trades` keeps one code
 path, holds in both engines, and makes `payments(asset_code, asset_issuer)` a total
 key. The repository carries a regression test that asserts both halves of this: that
@@ -150,17 +188,33 @@ and independently testable:
 
 ## SQLite → Postgres migration path (Phase 2)
 
-- Same logical schema, translated: `TEXT` amount columns become `NUMERIC`,
-  `TEXT` timestamps become `TIMESTAMPTZ`.
-- Migration tooling: a versioned migrations directory, applied via a
-  minimal runner (not a heavy ORM) so both SQLite and Postgres can consume
-  the same migration files with a small dialect shim.
+- **Done (#48)** — Same logical schema, translated: `TEXT` amount columns
+  become `NUMERIC(19, 7)`, `TEXT` timestamps become `TIMESTAMPTZ`. See the
+  token table under [Schema](#schema-dual-dialect-sqlite-and-postgres).
+- **Done (#48)** — Migration tooling: a versioned migrations directory,
+  applied via a minimal runner (not a heavy ORM) so both SQLite and Postgres
+  consume the same migration files with a small dialect shim.
+  `migrate --db <path>` targets SQLite, `migrate --postgres <url>` targets
+  Postgres. Migration checksums are taken over the *rendered* SQL, so each
+  engine records what was actually applied to it, and introducing the shim did
+  not invalidate any already-migrated SQLite database.
 - Analytical views become materialized views in Postgres, with a documented
   refresh strategy (`REFRESH MATERIALIZED VIEW CONCURRENTLY` on a cron
   cadence) — this is the point where the two backends genuinely diverge in
-  behavior, and it's called out explicitly rather than papered over.
+  behavior, and it's called out explicitly rather than papered over. Tracked
+  in #51; the views are still plain `CREATE VIEW` in both engines today.
 - Partitioning by ledger-sequence range is noted as a Phase 3+ concern, not
   implemented until data volume actually warrants it.
+
+### What is not yet dual-dialect
+
+The **schema and its migrations** run on both engines. The **ingestion jobs do
+not**: `openDb` returns a `better-sqlite3` handle and the jobs in `src/ingest/`
+use its synchronous prepared-statement API throughout, so `ingest` is
+SQLite-only. Making it engine-agnostic means an async data-access seam through
+every job, which is a larger change than the schema translation and is
+deliberately not bundled into it. Until then, the Postgres path is for schema
+creation and for the migration/parity work in #53 — not for live ingestion.
 
 ## Query API (Phase 3, stretch)
 

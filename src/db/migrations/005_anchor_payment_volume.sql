@@ -32,11 +32,11 @@ SELECT
   a.name AS anchor_name,
   a.home_domain,
   p.asset_code,
-  date(o.created_at) AS day,
+  ${day(o.created_at)} AS day,
   COUNT(p.operation_id) AS payment_count,
-  SUM(CAST(p.amount AS REAL)) AS total_volume
+  SUM(${amount(p.amount)}) AS total_volume
 FROM payments p
 JOIN operations o ON p.operation_id = o.id
 JOIN anchor_issuers a ON p.asset_issuer = a.account_id
 WHERE p.asset_issuer <> ''
-GROUP BY a.account_id, a.name, a.home_domain, p.asset_code, date(o.created_at);
+GROUP BY a.account_id, a.name, a.home_domain, p.asset_code, ${day(o.created_at)};

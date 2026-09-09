@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Db } from './client.ts';
+import { render, SQLITE, type Dialect } from './dialect.ts';
 
 export const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'migrations');
 
@@ -30,8 +31,21 @@ function checksumOf(sql: string): string {
   return createHash('sha256').update(sql.replace(/\r\n/g, '\n')).digest('hex');
 }
 
-/** Read and validate the migration set from disk, ordered by version. */
-export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
+/**
+ * Read and validate the migration set from disk, ordered by version.
+ *
+ * `sql` and `checksum` are for the *rendered* SQL — the dialect tokens in the
+ * file expanded for `dialect` — not for the raw file text. That is deliberate:
+ * the checksum records what was actually applied to a given database, and the
+ * two dialects genuinely apply different DDL from the same file. It also means
+ * the SQLite checksums are unchanged by the introduction of the shim, so an
+ * existing SQLite database does not see every applied migration as tampered
+ * with. `test/dialect.test.ts` pins those seven hashes.
+ */
+export function loadMigrations(
+  dir: string = MIGRATIONS_DIR,
+  dialect: Dialect = SQLITE,
+): Migration[] {
   const migrations: Migration[] = [];
   const seen = new Map<number, string>();
 
@@ -56,22 +70,62 @@ export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
     }
     seen.set(version, filename);
 
-    const sql = readFileSync(join(dir, filename), 'utf8');
+    const sql = render(readFileSync(join(dir, filename), 'utf8'), dialect);
     migrations.push({ version, name, sql, checksum: checksumOf(sql) });
   }
 
   return migrations.sort((a, b) => a.version - b.version);
 }
 
+/**
+ * Refuse to run if an applied migration's content has changed.
+ *
+ * Shared by both engine runners so the rule cannot drift between them: a
+ * migration whose content changed after being applied means the database and
+ * the repo disagree about what the schema is. Refusing here is the whole point
+ * of storing the checksum — the alternative is a silent drift that only
+ * surfaces as a confusing failure much later, or as a Phase 2 parity mismatch.
+ */
+export function assertNoChecksumDrift(
+  onDisk: readonly Migration[],
+  applied: ReadonlyMap<number, AppliedMigration>,
+): void {
+  for (const migration of onDisk) {
+    const record = applied.get(migration.version);
+    if (record && record.checksum !== migration.checksum) {
+      throw new Error(
+        `Migration ${migration.version}_${migration.name}.sql has changed since it was ` +
+          `applied (recorded ${record.checksum.slice(0, 12)}, on disk ` +
+          `${migration.checksum.slice(0, 12)}). Add a new migration instead of editing ` +
+          'an applied one.',
+      );
+    }
+  }
+}
+
 function ensureTrackingTable(db: Db): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version     INTEGER PRIMARY KEY,
-      name        TEXT NOT NULL,
-      checksum    TEXT NOT NULL,
-      applied_at  TEXT NOT NULL
-    )
-  `);
+  db.exec(SQLITE.schemaMigrationsDdl());
+}
+
+/**
+ * Normalise raw `schema_migrations` rows into `AppliedMigration`.
+ *
+ * Exists because the two drivers hand back different JavaScript types for the
+ * same logical row: `applied_at` is TEXT in SQLite and arrives as a string, but
+ * is TIMESTAMPTZ in Postgres and arrives as a `Date`. Both are normalised to an
+ * ISO8601 string so callers -- and the parity checks in issue #53 -- compare
+ * like with like rather than a string against a Date.
+ */
+export function appliedMigrationsFrom(rows: readonly unknown[]): AppliedMigration[] {
+  return rows.map((row) => {
+    const r = row as { version: number; name: string; checksum: string; applied_at: unknown };
+    return {
+      version: Number(r.version),
+      name: r.name,
+      checksum: r.checksum,
+      applied_at: r.applied_at instanceof Date ? r.applied_at.toISOString() : String(r.applied_at),
+    };
+  });
 }
 
 export function appliedMigrations(db: Db): AppliedMigration[] {
@@ -93,21 +147,7 @@ export function migrate(db: Db, dir: string = MIGRATIONS_DIR): number[] {
   const onDisk = loadMigrations(dir);
   const applied = new Map(appliedMigrations(db).map((m) => [m.version, m]));
 
-  // A migration whose content changed after being applied means the database and
-  // the repo disagree about what the schema is. Refusing here is the whole point
-  // of storing the checksum: the alternative is a silent drift that only surfaces
-  // as a confusing failure much later, or as a Phase 2 parity mismatch.
-  for (const migration of onDisk) {
-    const record = applied.get(migration.version);
-    if (record && record.checksum !== migration.checksum) {
-      throw new Error(
-        `Migration ${migration.version}_${migration.name}.sql has changed since it was ` +
-          `applied (recorded ${record.checksum.slice(0, 12)}, on disk ` +
-          `${migration.checksum.slice(0, 12)}). Add a new migration instead of editing ` +
-          'an applied one.',
-      );
-    }
-  }
+  assertNoChecksumDrift(onDisk, applied);
 
   const record = db.prepare(
     'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)',

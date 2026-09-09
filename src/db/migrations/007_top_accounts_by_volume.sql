@@ -32,10 +32,10 @@ WITH account_payment_legs AS (
     p.from_account AS account_id,
     p.asset_code,
     p.asset_issuer,
-    date(o.created_at) AS day,
+    ${day(o.created_at)} AS day,
     1 AS sent_count,
     0 AS received_count,
-    CAST(p.amount AS REAL) AS sent_volume,
+    ${amount(p.amount)} AS sent_volume,
     0.0 AS received_volume
   FROM payments p
   JOIN operations o ON p.operation_id = o.id
@@ -47,11 +47,11 @@ WITH account_payment_legs AS (
     p.to_account AS account_id,
     p.asset_code,
     p.asset_issuer,
-    date(o.created_at) AS day,
+    ${day(o.created_at)} AS day,
     0 AS sent_count,
     1 AS received_count,
     0.0 AS sent_volume,
-    CAST(p.amount AS REAL) AS received_volume
+    ${amount(p.amount)} AS received_volume
   FROM payments p
   JOIN operations o ON p.operation_id = o.id
 )
