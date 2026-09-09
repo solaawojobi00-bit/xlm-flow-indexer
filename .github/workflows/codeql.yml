@@ -30,7 +30,7 @@ jobs:
       actions: read
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # javascript-typescript covers both languages in one pack and needs no
       # build: the extractor reads sources directly, which suits a project that
