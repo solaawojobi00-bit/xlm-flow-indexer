@@ -64,12 +64,12 @@ async function rows<T = Record<string, unknown>>(sql: string, values?: unknown[]
 
 describe('migrations apply to Postgres', { skip }, () => {
   it('applies every migration from an empty schema', async () => {
-    assert.deepEqual(await migratePostgres(db()), [1, 2, 3, 4, 5, 6, 7]);
+    assert.deepEqual(await migratePostgres(db()), [1, 2, 3, 4, 5, 6, 7, 8]);
 
     const applied = await appliedPostgresMigrations(db());
     assert.deepEqual(
       applied.map((m) => m.version),
-      [1, 2, 3, 4, 5, 6, 7],
+      [1, 2, 3, 4, 5, 6, 7, 8],
     );
     // applied_at is TIMESTAMPTZ here and TEXT in SQLite; both are normalised to
     // an ISO8601 string so the two engines' records compare like with like.
@@ -81,7 +81,7 @@ describe('migrations apply to Postgres', { skip }, () => {
   it('is a no-op on a second run', async () => {
     await migratePostgres(db());
     assert.deepEqual(await migratePostgres(db()), [], 'second run must apply nothing');
-    assert.equal((await appliedPostgresMigrations(db())).length, 7);
+    assert.equal((await appliedPostgresMigrations(db())).length, 8);
   });
 
   it('creates every table and view', async () => {
@@ -98,6 +98,7 @@ describe('migrations apply to Postgres', { skip }, () => {
     assert.deepEqual(tables, [
       'accounts',
       'anchor_issuers',
+      'ingest_state',
       'ledgers',
       'operations',
       'payments',
@@ -309,6 +310,96 @@ describe('the #1 schema amendments hold in Postgres', { skip }, () => {
     ).map((r) => r.column_name);
 
     assert.deepEqual(columns, ['base_asset_issuer', 'counter_asset_issuer']);
+  });
+});
+
+describe('ingest_state watermark in Postgres', { skip }, () => {
+  /**
+   * The watermark upsert, run against the real engine (issue #52).
+   *
+   * This suite exists because the obvious way to write it is SQLite-only and
+   * CI did not catch it: `last_ledger = MAX(excluded.last_ledger,
+   * ingest_state.last_ledger)` works in SQLite, whose `max()` is a variadic
+   * scalar function, and is a syntax error in Postgres, where `MAX` is strictly
+   * an aggregate. The schema assertions above all passed while the statement
+   * the application actually runs would have failed on the first write.
+   *
+   * Expressed instead as a `DO UPDATE ... WHERE` predicate, which both engines
+   * read identically. These cases pin that it really is portable rather than
+   * portable-looking.
+   */
+  const upsert = `INSERT INTO ingest_state (job, last_ledger, updated_at)
+                  VALUES ($1, $2, $3)
+                  ON CONFLICT (job) DO UPDATE SET
+                    last_ledger = excluded.last_ledger,
+                    updated_at  = excluded.updated_at
+                  WHERE excluded.last_ledger > ingest_state.last_ledger`;
+
+  async function record(job: string, ledger: number): Promise<void> {
+    await db().query(upsert, [job, ledger, new Date().toISOString()]);
+  }
+
+  async function watermarkOf(job: string): Promise<number | undefined> {
+    const found = await rows<{ last_ledger: string }>(
+      'SELECT last_ledger FROM ingest_state WHERE job = $1',
+      [job],
+    );
+    // Postgres returns bigint-ish columns as strings through pg; INTEGER comes
+    // back as a number, but Number() keeps this robust either way.
+    return found[0] ? Number(found[0].last_ledger) : undefined;
+  }
+
+  it('inserts and then advances a watermark', async () => {
+    await migratePostgres(db());
+
+    await record('payments', 100);
+    assert.equal(await watermarkOf('payments'), 100);
+
+    await record('payments', 250);
+    assert.equal(await watermarkOf('payments'), 250);
+  });
+
+  it('refuses to move a watermark backwards', async () => {
+    await migratePostgres(db());
+
+    await record('payments', 500);
+    await record('payments', 100);
+
+    assert.equal(await watermarkOf('payments'), 500, 'monotonic in Postgres too');
+  });
+
+  it('keeps jobs independent', async () => {
+    await migratePostgres(db());
+
+    await record('payments', 100);
+    await record('trades', 900);
+
+    assert.equal(await watermarkOf('payments'), 100);
+    assert.equal(await watermarkOf('trades'), 900);
+    assert.equal(await watermarkOf('trustlines'), undefined);
+  });
+
+  it('enforces the job CHECK constraint', async () => {
+    await migratePostgres(db());
+
+    await assert.rejects(
+      () => record('nonsense', 1),
+      /violates check constraint/,
+      'the TypeScript union says nothing at runtime; the schema must',
+    );
+  });
+
+  it('stores updated_at as TIMESTAMPTZ', async () => {
+    await migratePostgres(db());
+    await record('payments', 1);
+
+    const [column] = await rows<{ data_type: string }>(
+      `SELECT data_type FROM information_schema.columns
+       WHERE table_schema = $1 AND table_name = 'ingest_state' AND column_name = 'updated_at'`,
+      [SCHEMA],
+    );
+
+    assert.equal(column?.data_type, 'timestamp with time zone');
   });
 });
 

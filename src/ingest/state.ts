@@ -44,9 +44,19 @@ export function allIngestState(db: Db): IngestState[] {
  * Advance a job's watermark.
  *
  * Monotonic by construction: the stored value only ever moves forward, because
- * `MAX(excluded, existing)` is applied in SQL rather than trusting the caller.
- * Two overlapping passes, or a re-run of an older range, therefore cannot rewind
+ * the guard lives in SQL rather than being trusted to the caller. Two
+ * overlapping passes, or a re-run of an older range, therefore cannot rewind
  * progress and cause the same ledgers to be re-read forever.
+ *
+ * The monotonicity is expressed as a `DO UPDATE ... WHERE` predicate rather than
+ * as `last_ledger = MAX(excluded.last_ledger, ingest_state.last_ledger)`, which
+ * is the obvious form and is SQLite-only: SQLite's `max()` is a variadic scalar
+ * function, while in Postgres `MAX` is strictly an aggregate and a two-argument
+ * call is a syntax error. `GREATEST` would be the Postgres spelling and does not
+ * exist in SQLite, so either scalar form would need a dialect token. The WHERE
+ * predicate is understood identically by both engines and needs no shim: when
+ * the incoming value is not greater the update is simply skipped, leaving the
+ * row -- and its `updated_at` -- untouched.
  *
  * There is deliberately no rewind counterpart. Filling a gap does not need one:
  * the documented backfill procedure runs the ordinary `ingest` command over the
@@ -63,7 +73,8 @@ export function recordIngestedLedger(db: Db, job: IngestJob, ledger: number): vo
     `INSERT INTO ingest_state (job, last_ledger, updated_at)
      VALUES (?, ?, ?)
      ON CONFLICT (job) DO UPDATE SET
-       last_ledger = MAX(excluded.last_ledger, ingest_state.last_ledger),
-       updated_at  = excluded.updated_at`,
+       last_ledger = excluded.last_ledger,
+       updated_at  = excluded.updated_at
+     WHERE excluded.last_ledger > ingest_state.last_ledger`,
   ).run(job, ledger, new Date().toISOString());
 }
