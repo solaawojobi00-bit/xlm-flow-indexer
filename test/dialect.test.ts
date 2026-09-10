@@ -86,19 +86,33 @@ describe('SQLite rendering is unchanged by the shim', () => {
     // SQLite, and it is its checksum that gets written to schema_migrations.
     for (const migration of loadMigrations()) {
       const file = `${String(migration.version).padStart(3, '0')}_${migration.name}.sql`;
-      assert.equal(migration.checksum, PRE_SHIM_CHECKSUMS[file], `${file} via loadMigrations`);
+      const pinned = PRE_SHIM_CHECKSUMS[file];
+      // Migrations added after the shim are not pinned -- see the next test.
+      if (pinned === undefined) continue;
+      assert.equal(migration.checksum, pinned, `${file} via loadMigrations`);
     }
   });
 
-  it('covers every migration on disk', () => {
-    // Without this, adding an eighth migration and forgetting to pin it would
-    // leave a silent hole in the guarantee above.
-    assert.deepEqual(
-      loadMigrations()
-        .map((m) => `${String(m.version).padStart(3, '0')}_${m.name}.sql`)
-        .sort(),
-      Object.keys(PRE_SHIM_CHECKSUMS).sort(),
+  it('still has every pinned migration on disk', () => {
+    /**
+     * A subset check, not an equality one.
+     *
+     * The guarantee being protected is specific: a database that applied one of
+     * these seven *before* the shim existed must still see the same checksum.
+     * Migrations added afterwards -- 008 onwards -- have no such history behind
+     * them, so pinning them would assert nothing and would turn every new
+     * migration into a test edit.
+     *
+     * What must not happen is one of the seven disappearing or being renamed,
+     * which would quietly drop it from the loop above and void the guarantee.
+     */
+    const onDisk = new Set(
+      loadMigrations().map((m) => `${String(m.version).padStart(3, '0')}_${m.name}.sql`),
     );
+
+    for (const file of Object.keys(PRE_SHIM_CHECKSUMS)) {
+      assert.ok(onDisk.has(file), `${file} is pinned but no longer on disk`);
+    }
   });
 });
 
