@@ -229,6 +229,24 @@ export class HorizonClient {
     return this.paginate<HorizonLedger>('/ledgers', params);
   }
 
+  /**
+   * Sequence of the most recent ledger Horizon reports.
+   *
+   * Read with `order=desc&limit=1` rather than by streaming, since only the head
+   * is wanted. Incremental ingestion (issue #52) uses this as the upper bound of
+   * a delta pass, stopping short of it by a confirmation lag — Horizon's own
+   * ingestion is asynchronous, so the newest ledger it names may not have all of
+   * its operations queryable yet.
+   */
+  async latestLedger(): Promise<number> {
+    const page = await this.getPage<HorizonLedger>('/ledgers', { order: 'desc', limit: 1 });
+    const latest = page._embedded.records[0];
+    if (latest === undefined) {
+      throw new Error('Horizon reported no ledgers, so there is no chain head to poll towards.');
+    }
+    return latest.sequence;
+  }
+
   operations(
     params: PagingParams & Readonly<Record<string, string | number | undefined>> = {},
   ): AsyncGenerator<HorizonOperation, void, undefined> {

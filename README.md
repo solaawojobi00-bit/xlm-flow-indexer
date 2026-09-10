@@ -71,6 +71,90 @@ node src/cli.ts ingest --from 4539850 --to 4539862 --db ./indexer.db --anchors c
 
 Ingestion is fully idempotent — running ingestion multiple times over the same ledger range safely ignores duplicate records without duplicating database rows.
 
+### 3. Poll for new ledgers (incremental ingestion)
+
+`ingest` needs an explicit range. `poll` instead resumes each job from where it
+last stopped, so only ledgers not yet processed are fetched:
+
+```bash
+# First run: say where to begin. Required, so a first poll cannot silently
+# skip history.
+node src/cli.ts poll --db ./indexer.db --start-ledger 4539850 --interval 30
+
+# Later runs resume on their own.
+node src/cli.ts poll --db ./indexer.db --interval 30
+
+# A single tick, for cron or a scheduled workflow.
+node src/cli.ts poll --db ./indexer.db --once
+```
+
+Progress lives in the `ingest_state` table, one row per job:
+
+```sql
+SELECT job, last_ledger, updated_at FROM ingest_state ORDER BY job;
+```
+
+#### CLI Poll Options
+
+- `--db <path>`: Path to the SQLite database file (required).
+- `--interval <seconds>`: Seconds between ticks (default: `30`).
+- `--start-ledger <n>`: Where to begin when a job has no watermark yet. Required on a job's first run.
+- `--once`: Run a single tick and exit.
+- `--max-ticks <n>`: Stop after `n` ticks.
+- `--confirmation-lag <n>`: Ledgers to stay behind the chain head (default: `5`).
+- `--max-ledgers <n>`: Most ledgers to cover in one pass (default: `200`).
+- `--horizon <url>`, `--jobs <list>`: As for `ingest`.
+
+Two defaults are worth understanding:
+
+- **`--confirmation-lag`** exists because Horizon's own ingestion is
+  asynchronous: the newest ledger it reports may not have all of its operations
+  queryable yet. Since the watermark only ever moves forward, advancing onto a
+  partially-indexed ledger would skip records permanently. Staying a few ledgers
+  behind removes that risk.
+- **`--max-ledgers`** bounds the work per tick, so returning from a long outage
+  does not turn one tick into an unbounded catch-up. Successive ticks walk
+  forward until the backlog is drained.
+
+Each job keeps its own watermark, so they advance independently — a trustlines
+outage does not rewind payments. A watermark is written only *after* its pass
+completes, so an interrupted pass is retried in full rather than skipped.
+
+#### Backfilling after a gap
+
+If ledgers were missed — an outage longer than your retention of them, a bug
+found later, a range ingested against a stale anchors file — fill the gap with
+the ordinary `ingest` command over the explicit range:
+
+```bash
+node src/cli.ts ingest --from 4539000 --to 4539100 --db ./indexer.db --anchors config/anchors.json
+```
+
+There is deliberately no separate backfill mode, and no command to rewind a
+watermark:
+
+- Backfill writes through **the same statements** as `poll`, so there is no
+  second ingestion path that could drift from the first.
+- It is safe to run against ledgers already covered. Every insert is
+  `ON CONFLICT DO NOTHING`, so overlapping a backfill with polled ground writes
+  nothing new rather than duplicating rows.
+- It leaves `ingest_state` untouched, so the poll loop keeps moving forward from
+  the head and does not re-walk the range you just repaired.
+
+To find gaps, compare what is present against what the watermark claims:
+
+```sql
+-- Ledgers the payments job claims to have processed, versus what is stored.
+SELECT
+  (SELECT last_ledger FROM ingest_state WHERE job = 'payments') AS watermark,
+  (SELECT MIN(sequence) FROM ledgers)                           AS first_stored,
+  (SELECT MAX(sequence) FROM ledgers)                           AS last_stored,
+  (SELECT COUNT(*) FROM ledgers)                                AS stored_count;
+```
+
+A `stored_count` smaller than `last_stored - first_stored + 1` means at least
+one ledger in that span is missing.
+
 ---
 
 ## Schema Overview

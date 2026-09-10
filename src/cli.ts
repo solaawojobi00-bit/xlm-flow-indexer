@@ -6,7 +6,9 @@ import { openDb } from './db/client.ts';
 import { migrate } from './db/migrate.ts';
 import { migratePostgres } from './db/postgres.ts';
 import { HorizonClient } from './horizon/client.ts';
+import { poll } from './ingest/incremental.ts';
 import { ingestPayments } from './ingest/payments.ts';
+import { allIngestState, type IngestJob } from './ingest/state.ts';
 import { ingestTrades } from './ingest/trades.ts';
 import { ingestTrustlines } from './ingest/trustlines.ts';
 
@@ -19,6 +21,7 @@ Usage:
 Commands:
   migrate                 Apply pending schema migrations to the database
   ingest                  Ingest transactions and effects across a ledger range
+  poll                    Incrementally ingest new ledgers on an interval
 
 Global Options:
   -h, --help              Show this help message
@@ -44,11 +47,36 @@ Command: ingest
     --trustlines          Run trustlines ingestion job
     --trades              Run trades ingestion job
 
+Command: poll
+  Resumes each job from its own watermark in ingest_state, so only ledgers not
+  yet processed are fetched. Stops short of the chain head by --confirmation-lag
+  ledgers, because Horizon's own ingestion is asynchronous and the newest ledger
+  it reports may not have all its operations queryable yet.
+
+  To fill a gap, use the 'ingest' command over the explicit range -- see
+  "Backfilling after a gap" in README.md. Backfill writes through the same
+  statements and leaves the watermark untouched.
+
+  Options:
+    --db <path>           Path to the SQLite database file (required)
+    --interval <seconds>  Seconds between ticks (default: 30)
+    --start-ledger <n>    Where to begin when a job has no watermark yet.
+                          Required on a job's first run, so a first poll cannot
+                          silently skip history.
+    --once                Run a single tick and exit (useful for cron)
+    --max-ticks <n>       Stop after n ticks
+    --confirmation-lag <n>  Ledgers to stay behind the head (default: 5)
+    --max-ledgers <n>     Most ledgers per pass (default: 200)
+    --horizon <url>       Horizon base URL (default: https://horizon-testnet.stellar.org)
+    --jobs <list>         Comma-separated: payments,trustlines,trades (default: all)
+
 Examples:
   xlm-flow-indexer migrate --db ./indexer.db
   xlm-flow-indexer migrate --postgres postgres://localhost:5432/xlm
   xlm-flow-indexer ingest --from 4539850 --to 4539862 --db ./indexer.db
   xlm-flow-indexer ingest --from 4539850 --to 4539862 --db ./indexer.db --jobs payments,trades
+  xlm-flow-indexer poll --db ./indexer.db --start-ledger 4539850 --interval 30
+  xlm-flow-indexer poll --db ./indexer.db --once
 `;
 
 export type IngestJobName = 'payments' | 'trustlines' | 'trades';
@@ -57,6 +85,12 @@ export interface ParsedArgs {
   command?: string | undefined;
   db?: string | undefined;
   postgres?: string | undefined;
+  interval?: number | undefined;
+  startLedger?: number | undefined;
+  maxTicks?: number | undefined;
+  confirmationLag?: number | undefined;
+  maxLedgers?: number | undefined;
+  once: boolean;
   from?: number | undefined;
   to?: number | undefined;
   horizon?: string | undefined;
@@ -70,6 +104,12 @@ export function parseCliArgs(args: readonly string[]): ParsedArgs {
   let command: string | undefined;
   let db: string | undefined;
   let postgres: string | undefined;
+  let interval: number | undefined;
+  let startLedger: number | undefined;
+  let maxTicks: number | undefined;
+  let confirmationLag: number | undefined;
+  let maxLedgers: number | undefined;
+  let once = false;
   let from: number | undefined;
   let to: number | undefined;
   let horizon: string | undefined;
@@ -99,6 +139,33 @@ export function parseCliArgs(args: readonly string[]): ParsedArgs {
       postgres = args[++i];
     } else if (arg.startsWith('--postgres=')) {
       postgres = arg.slice(11);
+    } else if (arg === '--once') {
+      once = true;
+    } else if (arg === '--interval') {
+      const val = args[++i];
+      interval = val !== undefined ? Number(val) : NaN;
+    } else if (arg.startsWith('--interval=')) {
+      interval = Number(arg.slice(11));
+    } else if (arg === '--start-ledger') {
+      const val = args[++i];
+      startLedger = val !== undefined ? Number(val) : NaN;
+    } else if (arg.startsWith('--start-ledger=')) {
+      startLedger = Number(arg.slice(15));
+    } else if (arg === '--max-ticks') {
+      const val = args[++i];
+      maxTicks = val !== undefined ? Number(val) : NaN;
+    } else if (arg.startsWith('--max-ticks=')) {
+      maxTicks = Number(arg.slice(12));
+    } else if (arg === '--confirmation-lag') {
+      const val = args[++i];
+      confirmationLag = val !== undefined ? Number(val) : NaN;
+    } else if (arg.startsWith('--confirmation-lag=')) {
+      confirmationLag = Number(arg.slice(19));
+    } else if (arg === '--max-ledgers') {
+      const val = args[++i];
+      maxLedgers = val !== undefined ? Number(val) : NaN;
+    } else if (arg.startsWith('--max-ledgers=')) {
+      maxLedgers = Number(arg.slice(14));
     } else if (arg === '--from') {
       const val = args[++i];
       from = val !== undefined ? Number(val) : NaN;
@@ -144,7 +211,24 @@ export function parseCliArgs(args: readonly string[]): ParsedArgs {
       ? Array.from(new Set(specificJobs))
       : ['payments', 'trustlines', 'trades'];
 
-  return { command, db, postgres, from, to, horizon, anchors, jobs, help, version };
+  return {
+    command,
+    db,
+    postgres,
+    interval,
+    startLedger,
+    maxTicks,
+    confirmationLag,
+    maxLedgers,
+    once,
+    from,
+    to,
+    horizon,
+    anchors,
+    jobs,
+    help,
+    version,
+  };
 }
 
 /**
@@ -178,6 +262,103 @@ async function migrateToPostgres(connectionString: string): Promise<number> {
     return 1;
   } finally {
     await client.end();
+  }
+}
+
+/** Validate a numeric CLI flag, returning an error message or undefined. */
+function invalidPositive(name: string, value: number | undefined, min: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (isNaN(value) || !Number.isInteger(value) || value < min) {
+    return `Error: Invalid ${name} (must be an integer >= ${String(min)})`;
+  }
+  return undefined;
+}
+
+async function runPoll(parsed: ParsedArgs): Promise<number> {
+  if (!parsed.db) {
+    console.error('Error: Missing required argument --db <path>');
+    return 1;
+  }
+
+  for (const problem of [
+    invalidPositive('--interval', parsed.interval, 1),
+    invalidPositive('--start-ledger', parsed.startLedger, 1),
+    invalidPositive('--max-ticks', parsed.maxTicks, 1),
+    invalidPositive('--confirmation-lag', parsed.confirmationLag, 0),
+    invalidPositive('--max-ledgers', parsed.maxLedgers, 1),
+  ]) {
+    if (problem) {
+      console.error(problem);
+      return 1;
+    }
+  }
+
+  const intervalSeconds = parsed.interval ?? 30;
+  const horizonUrl = parsed.horizon ?? 'https://horizon-testnet.stellar.org';
+  const client = new HorizonClient({ baseUrl: horizonUrl });
+  const jobs = parsed.jobs as IngestJob[];
+
+  console.log(`Polling every ${String(intervalSeconds)}s`);
+  console.log(`Database: ${parsed.db}`);
+  console.log(`Horizon:  ${horizonUrl}`);
+  console.log(`Jobs:     ${jobs.join(', ')}`);
+
+  const db = openDb(parsed.db);
+  try {
+    migrate(db);
+
+    const existing = allIngestState(db);
+    if (existing.length === 0) {
+      console.log('Watermarks: none recorded yet');
+    } else {
+      for (const state of existing) {
+        console.log(`Watermark: ${state.job} at ledger ${String(state.last_ledger)}`);
+      }
+    }
+
+    // Ctrl-C stops after the job in flight rather than mid-write, so a tick
+    // never leaves a watermark claiming more than was actually processed.
+    const controller = new AbortController();
+    const onSignal = (): void => {
+      console.log('\nStopping after the current job...');
+      controller.abort();
+    };
+    process.once('SIGINT', onSignal);
+    process.once('SIGTERM', onSignal);
+
+    try {
+      await poll(db, client, {
+        jobs,
+        intervalSeconds,
+        maxTicks: parsed.once ? 1 : parsed.maxTicks,
+        startLedger: parsed.startLedger,
+        confirmationLag: parsed.confirmationLag,
+        maxLedgersPerPass: parsed.maxLedgers,
+        signal: controller.signal,
+        onPass: (result) => {
+          if (!result.range) {
+            console.log(
+              `[${result.job}] up to date at ledger ${String(result.lastLedger ?? 0)} ` +
+                `(head ${String(result.latestLedger)})`,
+            );
+            return;
+          }
+          console.log(
+            `[${result.job}] ingested ${String(result.range.fromLedger)}..${String(result.range.toLedger)} ` +
+              `(head ${String(result.latestLedger)})`,
+          );
+        },
+      });
+      return 0;
+    } finally {
+      process.removeListener('SIGINT', onSignal);
+      process.removeListener('SIGTERM', onSignal);
+    }
+  } catch (err) {
+    console.error(`\nPolling failed: ${(err as Error).message}`);
+    return 1;
+  } finally {
+    db.close();
   }
 }
 
@@ -231,6 +412,10 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       console.error(`Migration failed: ${(err as Error).message}`);
       return 1;
     }
+  }
+
+  if (parsed.command === 'poll') {
+    return await runPoll(parsed);
   }
 
   if (parsed.command === 'ingest') {
