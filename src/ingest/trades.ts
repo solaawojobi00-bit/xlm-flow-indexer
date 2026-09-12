@@ -1,4 +1,4 @@
-import type { Db } from '../db/client.ts';
+import type { SqlAdapter } from '../db/adapter.ts';
 import type { HorizonClient } from '../horizon/client.ts';
 import { cursorBeforeLedger, ledgerOf } from '../horizon/toid.ts';
 import type { HorizonTrade } from '../horizon/types.ts';
@@ -60,7 +60,7 @@ function tradeTypeOf(trade: HorizonTrade): string {
  * Idempotent by primary key: a second run over the same range writes nothing.
  */
 export async function ingestTrades(
-  db: Db,
+  db: SqlAdapter,
   client: HorizonClient,
   range: LedgerRange,
 ): Promise<TradeIngestResult> {
@@ -70,18 +70,14 @@ export async function ingestTrades(
     );
   }
 
-  const insertLedger = db.prepare(
-    `INSERT INTO ledgers (sequence, closed_at, operation_count)
-     VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
-  );
-  const insertTrade = db.prepare(
-    `INSERT INTO trades (
+  const insertLedger = `INSERT INTO ledgers (sequence, closed_at, operation_count)
+     VALUES (?, ?, ?) ON CONFLICT DO NOTHING`;
+  const insertTrade = `INSERT INTO trades (
        id, ledger_sequence,
        base_asset_code, base_asset_issuer,
        counter_asset_code, counter_asset_issuer,
        base_amount, counter_amount, executed_at, trade_type
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-  );
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`;
 
   // Ledger parents first, for the same reason as the payments job: trades reference
   // ledgers(sequence) and foreign keys are enforced.
@@ -92,11 +88,9 @@ export async function ingestTrades(
     limit: 200,
   })) {
     if (ledger.sequence > range.toLedger) break;
-    ledgersWritten += insertLedger.run(
-      ledger.sequence,
-      ledger.closed_at,
-      ledger.operation_count,
-    ).changes;
+    ledgersWritten += (
+      await db.run(insertLedger, [ledger.sequence, ledger.closed_at, ledger.operation_count])
+    ).rowsAffected;
   }
 
   let tradesSeen = 0;
@@ -140,18 +134,20 @@ export async function ingestTrades(
 
     // Amounts written exactly as Horizon sent them; the TEXT columns exist so no
     // float round-trip happens anywhere in the write path.
-    tradesWritten += insertTrade.run(
-      trade.id,
-      ledgerSequence,
-      baseAsset.code,
-      baseAsset.issuer,
-      counterAsset.code,
-      counterAsset.issuer,
-      trade.base_amount,
-      trade.counter_amount,
-      trade.ledger_close_time,
-      tradeType,
-    ).changes;
+    tradesWritten += (
+      await db.run(insertTrade, [
+        trade.id,
+        ledgerSequence,
+        baseAsset.code,
+        baseAsset.issuer,
+        counterAsset.code,
+        counterAsset.issuer,
+        trade.base_amount,
+        trade.counter_amount,
+        trade.ledger_close_time,
+        tradeType,
+      ])
+    ).rowsAffected;
   }
 
   return {

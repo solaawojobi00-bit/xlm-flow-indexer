@@ -1,4 +1,4 @@
-import type { Db } from '../db/client.ts';
+import type { SqlAdapter } from '../db/adapter.ts';
 import type { HorizonClient } from '../horizon/client.ts';
 import { cursorBeforeLedger, ledgerOf } from '../horizon/toid.ts';
 import type { HorizonLedger, HorizonOperation } from '../horizon/types.ts';
@@ -65,36 +65,26 @@ function destinationAmount(op: HorizonOperation): string | undefined {
   return op.amount;
 }
 
-interface Statements {
-  readonly insertLedger: import('better-sqlite3').Statement;
-  readonly insertAccount: import('better-sqlite3').Statement;
-  readonly insertOperation: import('better-sqlite3').Statement;
-  readonly insertPayment: import('better-sqlite3').Statement;
-}
+// ON CONFLICT DO NOTHING throughout: re-running over an ingested range must be a
+// no-op rather than a duplicate-row error. This is the property BACKLOG.md item 6
+// exists to prove and item 18's incremental ingestion depends on. The bare form --
+// no conflict target -- is read identically by both engines, so these need no
+// dialect token.
+//
+// Module constants rather than statements prepared per call. The adapter compiles
+// each of these once per connection and reuses it (see ../db/sqlite-adapter.ts),
+// which is what the old hoisted-`prepare` shape was buying.
+const INSERT_LEDGER = `INSERT INTO ledgers (sequence, closed_at, operation_count)
+   VALUES (?, ?, ?) ON CONFLICT DO NOTHING`;
 
-function prepare(db: Db): Statements {
-  return {
-    // ON CONFLICT DO NOTHING throughout: re-running over an ingested range must be a
-    // no-op rather than a duplicate-row error. This is the property BACKLOG.md item 6
-    // exists to prove and item 18's incremental ingestion depends on.
-    insertLedger: db.prepare(
-      `INSERT INTO ledgers (sequence, closed_at, operation_count)
-       VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
-    ),
-    insertAccount: db.prepare(
-      'INSERT INTO accounts (account_id) VALUES (?) ON CONFLICT DO NOTHING',
-    ),
-    insertOperation: db.prepare(
-      `INSERT INTO operations (id, ledger_sequence, type, source_account, created_at)
-       VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-    ),
-    insertPayment: db.prepare(
-      `INSERT INTO payments
-         (operation_id, from_account, to_account, asset_code, asset_issuer, amount)
-       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-    ),
-  };
-}
+const INSERT_ACCOUNT = 'INSERT INTO accounts (account_id) VALUES (?) ON CONFLICT DO NOTHING';
+
+const INSERT_OPERATION = `INSERT INTO operations (id, ledger_sequence, type, source_account, created_at)
+   VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`;
+
+const INSERT_PAYMENT = `INSERT INTO payments
+     (operation_id, from_account, to_account, asset_code, asset_issuer, amount)
+   VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`;
 
 /**
  * Ingest the ledgers covering a range.
@@ -104,10 +94,9 @@ function prepare(db: Db): Statements {
  * is missing is rejected rather than silently orphaned.
  */
 async function ingestLedgers(
-  db: Db,
+  db: SqlAdapter,
   client: HorizonClient,
   range: LedgerRange,
-  statements: Statements,
 ): Promise<number> {
   let written = 0;
 
@@ -117,12 +106,12 @@ async function ingestLedgers(
     limit: 200,
   })) {
     if (ledger.sequence > range.toLedger) break;
-    const info = statements.insertLedger.run(
+    const info = await db.run(INSERT_LEDGER, [
       ledger.sequence,
       ledger.closed_at,
       ledger.operation_count,
-    );
-    written += info.changes;
+    ]);
+    written += info.rowsAffected;
   }
 
   return written;
@@ -135,7 +124,7 @@ async function ingestLedgers(
  * second time.
  */
 export async function ingestPayments(
-  db: Db,
+  db: SqlAdapter,
   client: HorizonClient,
   range: LedgerRange,
 ): Promise<IngestResult> {
@@ -145,8 +134,7 @@ export async function ingestPayments(
     );
   }
 
-  const statements = prepare(db);
-  const ledgersWritten = await ingestLedgers(db, client, range, statements);
+  const ledgersWritten = await ingestLedgers(db, client, range);
 
   let operationsScanned = 0;
   let paymentsSeen = 0;
@@ -181,27 +169,24 @@ export async function ingestPayments(
 
     // Parents before children, so the foreign keys hold.
     for (const account of new Set([op.source_account, from, to])) {
-      accountsWritten += statements.insertAccount.run(account).changes;
+      accountsWritten += (await db.run(INSERT_ACCOUNT, [account])).rowsAffected;
     }
 
-    operationsWritten += statements.insertOperation.run(
-      op.id,
-      ledgerSequence,
-      op.type,
-      op.source_account,
-      op.created_at,
-    ).changes;
+    operationsWritten += (
+      await db.run(INSERT_OPERATION, [
+        op.id,
+        ledgerSequence,
+        op.type,
+        op.source_account,
+        op.created_at,
+      ])
+    ).rowsAffected;
 
     // amount is written exactly as Horizon sent it. Any numeric round-trip here would
     // reintroduce the float precision loss the TEXT column exists to avoid.
-    paymentsWritten += statements.insertPayment.run(
-      op.id,
-      from,
-      to,
-      asset.code,
-      asset.issuer,
-      amount,
-    ).changes;
+    paymentsWritten += (
+      await db.run(INSERT_PAYMENT, [op.id, from, to, asset.code, asset.issuer, amount])
+    ).rowsAffected;
   }
 
   return {

@@ -6,6 +6,7 @@ import { migrate } from '../../src/db/migrate.ts';
 import { HorizonClient } from '../../src/horizon/client.ts';
 import { cursorBeforeLedger, ledgerOf } from '../../src/horizon/toid.ts';
 import { ingestPayments, normaliseAsset, PAYMENT_TYPES } from '../../src/ingest/payments.ts';
+import { adapt } from '../helpers/adapter.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 
 const FIXTURE_NAME = 'testnet-payments-4539850-4539862';
@@ -99,7 +100,7 @@ describe('payment type filter', () => {
 describe('ingestPayments against recorded testnet data', () => {
   it('ingests the pinned range', async () => {
     const db = freshDb();
-    const result = await ingestPayments(db, client(), range());
+    const result = await ingestPayments(adapt(db), client(), range());
 
     assert.equal(result.ledgersWritten, 13, 'ledgers 4539850-4539862 inclusive');
     assert.equal(result.operationsScanned, 140);
@@ -114,7 +115,7 @@ describe('ingestPayments against recorded testnet data', () => {
 
   it('records both native and issued assets from real data', async () => {
     const db = freshDb();
-    await ingestPayments(db, client(), range());
+    await ingestPayments(adapt(db), client(), range());
 
     const byAsset = db
       .prepare(
@@ -136,7 +137,7 @@ describe('ingestPayments against recorded testnet data', () => {
 
   it('writes native issuer as empty string, never NULL', async () => {
     const db = freshDb();
-    await ingestPayments(db, client(), range());
+    await ingestPayments(adapt(db), client(), range());
 
     const nulls = (
       db.prepare('SELECT COUNT(*) c FROM payments WHERE asset_issuer IS NULL').get() as {
@@ -149,7 +150,7 @@ describe('ingestPayments against recorded testnet data', () => {
 
   it('stores amounts exactly as Horizon sent them', async () => {
     const db = freshDb();
-    await ingestPayments(db, client(), range());
+    await ingestPayments(adapt(db), client(), range());
 
     // Pull the amounts straight out of the recorded response and compare to what
     // landed in the table. Any numeric round-trip in the write path shows up here.
@@ -182,7 +183,7 @@ describe('ingestPayments against recorded testnet data', () => {
 
   it('is idempotent: re-ingesting the same range writes nothing', async () => {
     const db = freshDb();
-    await ingestPayments(db, client(), range());
+    await ingestPayments(adapt(db), client(), range());
 
     const before = {
       ledgers: count(db, 'ledgers'),
@@ -191,7 +192,7 @@ describe('ingestPayments against recorded testnet data', () => {
       payments: count(db, 'payments'),
     };
 
-    const second = await ingestPayments(db, client(), range());
+    const second = await ingestPayments(adapt(db), client(), range());
 
     assert.equal(second.ledgersWritten, 0);
     assert.equal(second.accountsWritten, 0);
@@ -217,7 +218,7 @@ describe('ingestPayments against recorded testnet data', () => {
 
   it('writes parent rows so every foreign key resolves', async () => {
     const db = freshDb();
-    await ingestPayments(db, client(), range());
+    await ingestPayments(adapt(db), client(), range());
 
     const violations = db.pragma('foreign_key_check') as unknown[];
     assert.deepEqual(violations, [], 'no orphan rows');
@@ -238,7 +239,7 @@ describe('ingestPayments against recorded testnet data', () => {
     // The recorded operations page holds 200 records spanning past 4539862. Ingesting
     // a narrower range must stop on ledger sequence, not on the page boundary.
     const db = freshDb();
-    const narrow = await ingestPayments(db, client(), {
+    const narrow = await ingestPayments(adapt(db), client(), {
       fromLedger: fixture.fromLedger,
       toLedger: fixture.fromLedger + 2,
     });
@@ -258,7 +259,7 @@ describe('ingestPayments against recorded testnet data', () => {
   it('rejects an inverted range', async () => {
     const db = freshDb();
     await assert.rejects(
-      () => ingestPayments(db, client(), { fromLedger: 100, toLedger: 50 }),
+      () => ingestPayments(adapt(db), client(), { fromLedger: 100, toLedger: 50 }),
       RangeError,
     );
     db.close();

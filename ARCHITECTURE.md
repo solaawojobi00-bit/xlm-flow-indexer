@@ -206,15 +206,52 @@ and independently testable:
 - Partitioning by ledger-sequence range is noted as a Phase 3+ concern, not
   implemented until data volume actually warrants it.
 
+### The data-access seam (#67)
+
+The jobs no longer touch a driver. `src/db/adapter.ts` defines `SqlAdapter` — a
+connection-level, async interface of `run` / `get` / `all` / `transaction` /
+`close` — and everything in `src/ingest/`, plus `src/db/anchors.ts`, is written
+against it. `src/db/sqlite-adapter.ts` is the one implementation today.
+
+Connection-level rather than a `prepare()` returning a statement handle: that
+shape would model a lifecycle only better-sqlite3 has. The one thing it bought —
+compiling each statement once — is recovered inside the SQLite adapter, which
+caches compiled statements by SQL text, so the jobs lose the ceremony and not the
+compilation.
+
+Two details worth knowing:
+
+- `RunResult.rowsAffected` normalises better-sqlite3's `changes` and pg's
+  `rowCount`. Every "written" count an ingestion job reports is built from it,
+  which is what makes those counts mean *written* rather than *seen* under
+  `ON CONFLICT DO NOTHING`.
+- The adapter issues `BEGIN`/`COMMIT`/`ROLLBACK` itself rather than using
+  better-sqlite3's `db.transaction()`. That helper takes a *synchronous*
+  callback; handed an async one it would commit before any awaited statement had
+  run — a silent correctness bug, not a type error.
+
+This is unrelated to `dialect.ts`, despite both existing because the engines
+differ. `dialect.ts` is compile-time `${token}` substitution over
+repository-owned migration files; the adapter is runtime execution of
+hand-written job SQL. Neither calls the other. No job SQL needs a dialect token
+today — bare `ON CONFLICT DO NOTHING` and the watermark upsert's
+`DO UPDATE ... WHERE` predicate are read identically by both engines — and a use
+of `SqlAdapter.dialect` inside `src/ingest/` would be the signal that a statement
+had stopped being portable.
+
 ### What is not yet dual-dialect
 
-The **schema and its migrations** run on both engines. The **ingestion jobs do
-not**: `openDb` returns a `better-sqlite3` handle and the jobs in `src/ingest/`
-use its synchronous prepared-statement API throughout, so `ingest` is
-SQLite-only. Making it engine-agnostic means an async data-access seam through
-every job, which is a larger change than the schema translation and is
-deliberately not bundled into it. Until then, the Postgres path is for schema
-creation and for the migration/parity work in #53 — not for live ingestion.
+The **schema, its migrations, and the job logic** are engine-neutral. What is
+missing is the other adapter: there is no Postgres implementation of
+`SqlAdapter` yet, and `ingest`/`poll` still accept only `--db`. So the Postgres
+path remains schema creation plus the migration/parity work in #53 — not live
+ingestion. That is now a contained gap (one class and a CLI branch) rather than
+a refactor of every job.
+
+Separately, the jobs autocommit per statement, as they always have. That is
+fine for SQLite and will be a round-trip per row against Postgres; bounded
+per-page batching is deliberately left to its own change (#68), since it alters
+failure semantics rather than just performance.
 
 ## Query API (Phase 3, stretch)
 

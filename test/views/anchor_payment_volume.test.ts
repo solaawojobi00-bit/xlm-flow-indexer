@@ -6,6 +6,7 @@ import { openDb, type Db } from '../../src/db/client.ts';
 import { migrate } from '../../src/db/migrate.ts';
 import { HorizonClient } from '../../src/horizon/client.ts';
 import { ingestPayments } from '../../src/ingest/payments.ts';
+import { adapt } from '../helpers/adapter.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 
 const FIXTURE_NAME = 'testnet-payments-4539850-4539862';
@@ -63,7 +64,7 @@ describe('anchor_payment_volume view and loader', () => {
     assert.equal(views.length, 1);
   });
 
-  it('populates anchor_issuers idempotently via loadAnchorIssuers', () => {
+  it('populates anchor_issuers idempotently via loadAnchorIssuers', async () => {
     const db = freshDb();
     const config = [
       {
@@ -73,7 +74,7 @@ describe('anchor_payment_volume view and loader', () => {
       },
     ];
 
-    const count1 = loadAnchorIssuers(db, config);
+    const count1 = await loadAnchorIssuers(adapt(db), config);
     assert.equal(count1, 1);
     assert.equal((db.prepare('SELECT COUNT(*) c FROM anchor_issuers').get() as { c: number }).c, 1);
 
@@ -85,7 +86,7 @@ describe('anchor_payment_volume view and loader', () => {
         home_domain: 'paxos.com',
       },
     ];
-    const count2 = loadAnchorIssuers(db, updatedConfig);
+    const count2 = await loadAnchorIssuers(adapt(db), updatedConfig);
     assert.equal(count2, 1);
     assert.equal((db.prepare('SELECT COUNT(*) c FROM anchor_issuers').get() as { c: number }).c, 1);
 
@@ -95,9 +96,9 @@ describe('anchor_payment_volume view and loader', () => {
     assert.equal(row.name, 'Paxos Lab');
   });
 
-  it('populates anchor_issuers from a JSON config file path', () => {
+  it('populates anchor_issuers from a JSON config file path', async () => {
     const db = freshDb();
-    const count = loadAnchorIssuers(db, 'config/anchors.json');
+    const count = await loadAnchorIssuers(adapt(db), 'config/anchors.json');
     assert.ok(count >= 1);
 
     const rows = db.prepare('SELECT * FROM anchor_issuers').all();
@@ -106,7 +107,7 @@ describe('anchor_payment_volume view and loader', () => {
 
   it('aggregates anchor payment volume correctly against recorded testnet data', async () => {
     const db = freshDb();
-    loadAnchorIssuers(db, [
+    await loadAnchorIssuers(adapt(db), [
       {
         account_id: TESTNET_PAXOS_ISSUER,
         name: 'Paxos Testnet',
@@ -114,7 +115,7 @@ describe('anchor_payment_volume view and loader', () => {
       },
     ]);
 
-    await ingestPayments(db, client(), range());
+    await ingestPayments(adapt(db), client(), range());
 
     const rows = db
       .prepare(`SELECT * FROM anchor_payment_volume`)
@@ -134,7 +135,7 @@ describe('anchor_payment_volume view and loader', () => {
   it('excludes payments whose issuer is not in anchor_issuers', async () => {
     const db = freshDb();
     // Configure an anchor issuer that is NOT present in the payments data
-    loadAnchorIssuers(db, [
+    await loadAnchorIssuers(adapt(db), [
       {
         account_id: 'G_OTHER_ANCHOR_NOT_IN_PAYMENTS_DATA',
         name: 'Other Anchor',
@@ -142,13 +143,13 @@ describe('anchor_payment_volume view and loader', () => {
       },
     ]);
 
-    await ingestPayments(db, client(), range());
+    await ingestPayments(adapt(db), client(), range());
 
     const rows = db.prepare(`SELECT * FROM anchor_payment_volume`).all();
     assert.equal(rows.length, 0, 'non-configured anchor payments must not appear in the view');
   });
 
-  it('excludes native payments (asset_issuer = "") even if anchor table is misconfigured', () => {
+  it('excludes native payments (asset_issuer = "") even if anchor table is misconfigured', async () => {
     const db = freshDb();
     const sender = 'GA_NATIVE_SENDER';
     const receiver = 'GB_NATIVE_RECEIVER';
@@ -177,8 +178,8 @@ describe('anchor_payment_volume view and loader', () => {
     }, /CHECK/);
 
     // And loader also rejects empty string
-    assert.throws(() => {
-      loadAnchorIssuers(db, [{ account_id: '', name: 'Empty' }]);
+    await assert.rejects(async () => {
+      await loadAnchorIssuers(adapt(db), [{ account_id: '', name: 'Empty' }]);
     }, /cannot be empty/);
 
     // View returns 0 rows for native payments

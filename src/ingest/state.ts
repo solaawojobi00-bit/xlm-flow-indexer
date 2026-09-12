@@ -1,4 +1,4 @@
-import type { Db } from '../db/client.ts';
+import { isoStringOf, type SqlAdapter } from '../db/adapter.ts';
 
 /**
  * Ingestion jobs that carry their own watermark.
@@ -28,16 +28,40 @@ export function isIngestJob(value: string): value is IngestJob {
  * run has no opinion about where to start and the caller must supply one; a job
  * recorded at 0 has been initialised and should resume at ledger 1.
  */
-export function lastIngestedLedger(db: Db, job: IngestJob): number | undefined {
-  const row = db.prepare('SELECT last_ledger FROM ingest_state WHERE job = ?').get(job) as
-    { last_ledger: number } | undefined;
+export async function lastIngestedLedger(
+  db: SqlAdapter,
+  job: IngestJob,
+): Promise<number | undefined> {
+  const row = await db.get<{ last_ledger: number }>(
+    'SELECT last_ledger FROM ingest_state WHERE job = ?',
+    [job],
+  );
   return row ? Number(row.last_ledger) : undefined;
 }
 
-export function allIngestState(db: Db): IngestState[] {
-  return db
-    .prepare('SELECT job, last_ledger, updated_at FROM ingest_state ORDER BY job')
-    .all() as IngestState[];
+/**
+ * Every job's watermark, ordered by job.
+ *
+ * The columns are normalised rather than returned as the driver produced them.
+ * `updated_at` is the reason: it is TEXT in SQLite and TIMESTAMPTZ in Postgres,
+ * so the same column arrives as a string from one driver and a `Date` from the
+ * other, and `IngestState` promises a string. `isoStringOf` is the same
+ * normalisation `appliedMigrationsFrom` applies to `schema_migrations` -- shared
+ * rather than reimplemented, because a second copy is a second thing to fix.
+ *
+ * `last_ledger` gets the same treatment `lastIngestedLedger` already applied, so
+ * the two functions cannot disagree about the type of the same column.
+ */
+export async function allIngestState(db: SqlAdapter): Promise<IngestState[]> {
+  const rows = await db.all<{ job: IngestJob; last_ledger: number; updated_at: unknown }>(
+    'SELECT job, last_ledger, updated_at FROM ingest_state ORDER BY job',
+  );
+
+  return rows.map((row) => ({
+    job: row.job,
+    last_ledger: Number(row.last_ledger),
+    updated_at: isoStringOf(row.updated_at),
+  }));
 }
 
 /**
@@ -64,17 +88,22 @@ export function allIngestState(db: Db): IngestState[] {
  * leaving the watermark alone. Adding a rewind would mean a second way to reach
  * the same state, with the added risk of re-polling ground already covered.
  */
-export function recordIngestedLedger(db: Db, job: IngestJob, ledger: number): void {
+export async function recordIngestedLedger(
+  db: SqlAdapter,
+  job: IngestJob,
+  ledger: number,
+): Promise<void> {
   if (!Number.isInteger(ledger) || ledger < 0) {
     throw new RangeError(`Ledger watermark must be a non-negative integer, got ${String(ledger)}`);
   }
 
-  db.prepare(
+  await db.run(
     `INSERT INTO ingest_state (job, last_ledger, updated_at)
      VALUES (?, ?, ?)
      ON CONFLICT (job) DO UPDATE SET
        last_ledger = excluded.last_ledger,
        updated_at  = excluded.updated_at
      WHERE excluded.last_ledger > ingest_state.last_ledger`,
-  ).run(job, ledger, new Date().toISOString());
+    [job, ledger, new Date().toISOString()],
+  );
 }

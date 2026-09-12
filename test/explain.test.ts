@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { loadAnchorIssuers } from '../src/db/anchors.ts';
 import { openDb, type Db } from '../src/db/client.ts';
 import { migrate } from '../src/db/migrate.ts';
+import { adapt } from './helpers/adapter.ts';
 
 function migrated(): Db {
   const db = openDb(':memory:');
@@ -86,9 +87,9 @@ describe('indexing and query plan verification (Issue #15)', () => {
     db.close();
   });
 
-  it('anchor_payment_volume utilizes anchor_issuers PK and payments asset index', () => {
+  it('anchor_payment_volume utilizes anchor_issuers PK and payments asset index', async () => {
     const db = migrated();
-    loadAnchorIssuers(db, [{ account_id: 'GANCHOR1', name: 'Anchor 1' }]);
+    await loadAnchorIssuers(adapt(db), [{ account_id: 'GANCHOR1', name: 'Anchor 1' }]);
 
     const plan = explain(db, `SELECT * FROM anchor_payment_volume WHERE issuer_account_id = ?`, [
       'GANCHOR1',

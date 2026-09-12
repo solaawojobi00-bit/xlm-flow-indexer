@@ -6,6 +6,7 @@ import { migrate } from '../../src/db/migrate.ts';
 import { HorizonClient } from '../../src/horizon/client.ts';
 import { ledgerOf } from '../../src/horizon/toid.ts';
 import { ingestTrustlines } from '../../src/ingest/trustlines.ts';
+import { adapt } from '../helpers/adapter.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 
 const fixture = loadFixture('testnet-trustlines-4540630-4540680');
@@ -55,7 +56,7 @@ describe('ledgerOf with effect paging tokens', () => {
 describe('ingestTrustlines against recorded testnet data', () => {
   it('ingests trustline establishment for the pinned range', async () => {
     const db = freshDb();
-    const result = await ingestTrustlines(db, client(), range());
+    const result = await ingestTrustlines(adapt(db), client(), range());
 
     assert.equal(result.effectsScanned, 279);
     assert.equal(result.trustlinesSeen, 5);
@@ -66,7 +67,7 @@ describe('ingestTrustlines against recorded testnet data', () => {
 
   it('records the real assets and issuers', async () => {
     const db = freshDb();
-    await ingestTrustlines(db, client(), range());
+    await ingestTrustlines(adapt(db), client(), range());
 
     const rows = db
       .prepare(
@@ -100,7 +101,7 @@ describe('ingestTrustlines against recorded testnet data', () => {
     // 4540642). Reading change_trust operations instead of effects would record it as
     // a fresh trustline; this asserts it is absent.
     const db = freshDb();
-    await ingestTrustlines(db, client(), range());
+    await ingestTrustlines(adapt(db), client(), range());
 
     const codes = (
       db.prepare('SELECT DISTINCT asset_code FROM trustlines').all() as { asset_code: string }[]
@@ -112,11 +113,11 @@ describe('ingestTrustlines against recorded testnet data', () => {
 
   it('is idempotent: re-ingesting the same range writes nothing', async () => {
     const db = freshDb();
-    await ingestTrustlines(db, client(), range());
+    await ingestTrustlines(adapt(db), client(), range());
 
     const before = (db.prepare('SELECT COUNT(*) c FROM trustlines').get() as { c: number }).c;
 
-    const second = await ingestTrustlines(db, client(), range());
+    const second = await ingestTrustlines(adapt(db), client(), range());
 
     assert.equal(second.trustlinesWritten, 0);
     assert.equal(second.accountsWritten, 0);
@@ -151,7 +152,7 @@ describe('ingestTrustlines against recorded testnet data', () => {
 
   it('writes account parents so the foreign key resolves', async () => {
     const db = freshDb();
-    await ingestTrustlines(db, client(), range());
+    await ingestTrustlines(adapt(db), client(), range());
 
     assert.deepEqual(db.pragma('foreign_key_check'), []);
 
@@ -169,7 +170,7 @@ describe('ingestTrustlines against recorded testnet data', () => {
 
   it('stops at toLedger', async () => {
     const db = freshDb();
-    const narrow = await ingestTrustlines(db, client(), {
+    const narrow = await ingestTrustlines(adapt(db), client(), {
       fromLedger: fixture.fromLedger,
       toLedger: fixture.fromLedger + 5,
     });
@@ -180,7 +181,7 @@ describe('ingestTrustlines against recorded testnet data', () => {
   it('rejects an inverted range', async () => {
     const db = freshDb();
     await assert.rejects(
-      () => ingestTrustlines(db, client(), { fromLedger: 100, toLedger: 50 }),
+      () => ingestTrustlines(adapt(db), client(), { fromLedger: 100, toLedger: 50 }),
       RangeError,
     );
     db.close();
