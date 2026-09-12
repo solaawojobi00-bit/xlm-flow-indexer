@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { HorizonClient } from '../src/horizon/client.ts';
 import { openDb } from '../src/db/client.ts';
 import { migrate } from '../src/db/migrate.ts';
+import { sqliteAdapter } from '../src/db/sqlite-adapter.ts';
 import { ingestPayments } from '../src/ingest/payments.ts';
 import { ingestTrades } from '../src/ingest/trades.ts';
 import { ingestTrustlines } from '../src/ingest/trustlines.ts';
@@ -110,13 +111,14 @@ async function main(argv: string[]): Promise<number> {
   // Ingest into a throwaway in-memory database purely to exercise the real code path.
   const db = openDb(':memory:');
   migrate(db);
+  const sql = sqliteAdapter(db);
   const range = { fromLedger: from, toLedger: to };
   const summary =
     job === 'payments'
-      ? await ingestPayments(db, client, range)
+      ? await ingestPayments(sql, client, range)
       : job === 'trades'
-        ? await ingestTrades(db, client, range)
-        : await ingestTrustlines(db, client, range);
+        ? await ingestTrades(sql, client, range)
+        : await ingestTrustlines(sql, client, range);
   db.close();
 
   const fixture: Fixture = {

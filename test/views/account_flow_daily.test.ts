@@ -5,6 +5,7 @@ import { openDb, type Db } from '../../src/db/client.ts';
 import { migrate } from '../../src/db/migrate.ts';
 import { HorizonClient } from '../../src/horizon/client.ts';
 import { ingestPayments } from '../../src/ingest/payments.ts';
+import { adapt } from '../helpers/adapter.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 
 const FIXTURE_NAME = 'testnet-payments-4539850-4539862';
@@ -55,7 +56,7 @@ describe('account_flow_daily view', () => {
 
   it('aggregates daily flow correctly against recorded testnet data', async () => {
     const db = freshDb();
-    await ingestPayments(db, client(), range());
+    await ingestPayments(adapt(db), client(), range());
 
     const rows = db
       .prepare(

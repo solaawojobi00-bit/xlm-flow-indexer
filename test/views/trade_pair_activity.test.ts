@@ -5,6 +5,7 @@ import { openDb, type Db } from '../../src/db/client.ts';
 import { migrate } from '../../src/db/migrate.ts';
 import { HorizonClient } from '../../src/horizon/client.ts';
 import { ingestTrades } from '../../src/ingest/trades.ts';
+import { adapt } from '../helpers/adapter.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 
 const FIXTURE_NAME = 'testnet-trades-4534150-4534300';
@@ -60,7 +61,7 @@ describe('trade_pair_activity view', () => {
 
   it('aggregates trade pair activity correctly against recorded testnet data', async () => {
     const db = freshDb();
-    await ingestTrades(db, client(), range());
+    await ingestTrades(adapt(db), client(), range());
 
     const rows = db
       .prepare(

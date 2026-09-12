@@ -19,6 +19,7 @@ import {
   lastIngestedLedger,
   recordIngestedLedger,
 } from '../../src/ingest/state.ts';
+import { adapt } from '../helpers/adapter.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 
 /**
@@ -178,36 +179,43 @@ describe('nextRange', () => {
 });
 
 describe('ingest_state', () => {
-  it('reports no watermark for a job that has never run', () => {
+  it('reports no watermark for a job that has never run', async () => {
     const db = freshDb();
-    assert.equal(lastIngestedLedger(db, 'payments'), undefined);
-    assert.deepEqual(allIngestState(db), []);
+    assert.equal(await lastIngestedLedger(adapt(db), 'payments'), undefined);
+    assert.deepEqual(await allIngestState(adapt(db)), []);
   });
 
-  it('records and reads back a watermark per job', () => {
+  it('records and reads back a watermark per job', async () => {
     const db = freshDb();
-    recordIngestedLedger(db, 'payments', 100);
-    recordIngestedLedger(db, 'trades', 250);
+    await recordIngestedLedger(adapt(db), 'payments', 100);
+    await recordIngestedLedger(adapt(db), 'trades', 250);
 
-    assert.equal(lastIngestedLedger(db, 'payments'), 100);
-    assert.equal(lastIngestedLedger(db, 'trades'), 250);
-    assert.equal(lastIngestedLedger(db, 'trustlines'), undefined, 'jobs are independent');
+    assert.equal(await lastIngestedLedger(adapt(db), 'payments'), 100);
+    assert.equal(await lastIngestedLedger(adapt(db), 'trades'), 250);
+    assert.equal(
+      await lastIngestedLedger(adapt(db), 'trustlines'),
+      undefined,
+      'jobs are independent',
+    );
   });
 
-  it('only ever moves a watermark forward', () => {
+  it('only ever moves a watermark forward', async () => {
     // Monotonicity is enforced in SQL rather than by the caller, so an
     // out-of-order or replayed pass cannot rewind progress and make the poll
     // loop re-read the same ledgers forever.
     const db = freshDb();
-    recordIngestedLedger(db, 'payments', 500);
-    recordIngestedLedger(db, 'payments', 100);
+    await recordIngestedLedger(adapt(db), 'payments', 500);
+    await recordIngestedLedger(adapt(db), 'payments', 100);
 
-    assert.equal(lastIngestedLedger(db, 'payments'), 500);
+    assert.equal(await lastIngestedLedger(adapt(db), 'payments'), 500);
   });
 
-  it('rejects a negative watermark', () => {
+  it('rejects a negative watermark', async () => {
     const db = freshDb();
-    assert.throws(() => recordIngestedLedger(db, 'payments', -1), /non-negative integer/);
+    await assert.rejects(
+      () => recordIngestedLedger(adapt(db), 'payments', -1),
+      /non-negative integer/,
+    );
   });
 
   it('rejects an unknown job at the schema level', () => {
@@ -245,14 +253,14 @@ describe('incremental passes against recorded data', () => {
     const db = freshDb();
     const client = clientWithHead(wideServer, HEAD);
 
-    const result = await ingestIncrementalPass(db, client, 'payments', {
+    const result = await ingestIncrementalPass(adapt(db), client, 'payments', {
       startLedger: WIDE_FROM,
     });
 
     assert.deepEqual(result.range, { fromLedger: WIDE_FROM, toLedger: WIDE_TO });
     assert.equal(result.latestLedger, HEAD);
     assert.equal(result.lastLedger, WIDE_TO);
-    assert.equal(lastIngestedLedger(db, 'payments'), WIDE_TO);
+    assert.equal(await lastIngestedLedger(adapt(db), 'payments'), WIDE_TO);
     assert.deepEqual(counts(db), { ledgers: 33, accounts: 4, operations: 16, payments: 16 });
   });
 
@@ -260,16 +268,16 @@ describe('incremental passes against recorded data', () => {
     const db = freshDb();
     const client = clientWithHead(wideServer, HEAD);
 
-    await ingestIncrementalPass(db, client, 'payments', { startLedger: WIDE_FROM });
+    await ingestIncrementalPass(adapt(db), client, 'payments', { startLedger: WIDE_FROM });
     const before = counts(db);
 
-    const second = await ingestIncrementalPass(db, client, 'payments', {
+    const second = await ingestIncrementalPass(adapt(db), client, 'payments', {
       startLedger: WIDE_FROM,
     });
 
     assert.equal(second.range, undefined, 'nothing new to do');
     assert.deepEqual(counts(db), before);
-    assert.equal(lastIngestedLedger(db, 'payments'), WIDE_TO);
+    assert.equal(await lastIngestedLedger(adapt(db), 'payments'), WIDE_TO);
   });
 
   it('does not advance the watermark when ingestion throws', async () => {
@@ -286,22 +294,26 @@ describe('incremental passes against recorded data', () => {
     });
 
     await assert.rejects(
-      () => ingestIncrementalPass(db, client, 'payments', { startLedger: WIDE_FROM }),
+      () => ingestIncrementalPass(adapt(db), client, 'payments', { startLedger: WIDE_FROM }),
       /horizon exploded/,
     );
-    assert.equal(lastIngestedLedger(db, 'payments'), undefined, 'watermark must not move');
+    assert.equal(
+      await lastIngestedLedger(adapt(db), 'payments'),
+      undefined,
+      'watermark must not move',
+    );
   });
 
   it('reaches the same state as a single full-range ingest', async () => {
     // The claim that a delta pass is "just another range" through the same code
     // path, asserted rather than assumed.
     const incremental = freshDb();
-    await ingestIncrementalPass(incremental, clientWithHead(wideServer, HEAD), 'payments', {
+    await ingestIncrementalPass(adapt(incremental), clientWithHead(wideServer, HEAD), 'payments', {
       startLedger: WIDE_FROM,
     });
 
     const fullRange = freshDb();
-    await ingestPayments(fullRange, new HorizonClient({ baseUrl: wideServer.baseUrl }), {
+    await ingestPayments(adapt(fullRange), new HorizonClient({ baseUrl: wideServer.baseUrl }), {
       fromLedger: WIDE_FROM,
       toLedger: WIDE_TO,
     });
@@ -330,7 +342,7 @@ describe('idempotency holds under incremental mode', () => {
     const db = freshDb();
     const client = clientWithHead(narrowServer, NARROW_TO + DEFAULT_CONFIRMATION_LAG);
 
-    const first = await ingestIncrementalPass(db, client, 'payments', {
+    const first = await ingestIncrementalPass(adapt(db), client, 'payments', {
       startLedger: NARROW_FROM,
     });
     assert.deepEqual(first.range, { fromLedger: NARROW_FROM, toLedger: NARROW_TO });
@@ -341,7 +353,7 @@ describe('idempotency holds under incremental mode', () => {
     // exactly as it would look after a crash between the write and the record.
     db.prepare('DELETE FROM ingest_state WHERE job = ?').run('payments');
 
-    const second = await ingestIncrementalPass(db, client, 'payments', {
+    const second = await ingestIncrementalPass(adapt(db), client, 'payments', {
       startLedger: NARROW_FROM,
     });
 
@@ -373,7 +385,7 @@ describe('idempotency holds under incremental mode', () => {
     const db = freshDb();
 
     await ingestIncrementalPass(
-      db,
+      adapt(db),
       clientWithHead(narrowServer, NARROW_TO + DEFAULT_CONFIRMATION_LAG),
       'payments',
       { startLedger: NARROW_FROM },
@@ -383,7 +395,7 @@ describe('idempotency holds under incremental mode', () => {
     db.prepare('DELETE FROM ingest_state WHERE job = ?').run('payments');
 
     await ingestIncrementalPass(
-      db,
+      adapt(db),
       clientWithHead(wideServer, 4539872 + DEFAULT_CONFIRMATION_LAG),
       'payments',
       { startLedger: 4539840 },
@@ -404,7 +416,7 @@ describe('poll', () => {
     const db = freshDb();
     const seen: string[] = [];
 
-    const results = await poll(db, clientWithHead(wideServer, HEAD), {
+    const results = await poll(adapt(db), clientWithHead(wideServer, HEAD), {
       jobs: ['payments'],
       intervalSeconds: 30,
       maxTicks: 1,
@@ -416,7 +428,7 @@ describe('poll', () => {
 
     assert.equal(results.length, 1);
     assert.deepEqual(seen, ['payments:4539872']);
-    assert.equal(lastIngestedLedger(db, 'payments'), 4539872);
+    assert.equal(await lastIngestedLedger(adapt(db), 'payments'), 4539872);
   });
 
   it('sleeps between ticks but not after the last', async () => {
@@ -435,10 +447,10 @@ describe('poll', () => {
      * all. What is left for this test is the loop's own timing behaviour.
      */
     const db = freshDb();
-    recordIngestedLedger(db, 'payments', 4539872);
+    await recordIngestedLedger(adapt(db), 'payments', 4539872);
     let slept = 0;
 
-    const results = await poll(db, clientWithHead(wideServer, HEAD), {
+    const results = await poll(adapt(db), clientWithHead(wideServer, HEAD), {
       jobs: ['payments'],
       intervalSeconds: 30,
       maxTicks: 3,
@@ -454,14 +466,14 @@ describe('poll', () => {
       'every tick is a no-op, since the watermark is already at the safe head',
     );
     assert.equal(slept, 2, 'sleeps between ticks, not after the last');
-    assert.equal(lastIngestedLedger(db, 'payments'), 4539872, 'watermark unmoved');
+    assert.equal(await lastIngestedLedger(adapt(db), 'payments'), 4539872, 'watermark unmoved');
   });
 
   it('stops when the signal is aborted', async () => {
     const db = freshDb();
     const controller = new AbortController();
 
-    const results = await poll(db, clientWithHead(wideServer, HEAD), {
+    const results = await poll(adapt(db), clientWithHead(wideServer, HEAD), {
       jobs: ['payments'],
       intervalSeconds: 30,
       startLedger: 4539840,
@@ -475,7 +487,7 @@ describe('poll', () => {
     });
 
     assert.equal(results.length, 1, 'one tick ran before the abort took effect');
-    assert.equal(lastIngestedLedger(db, 'payments'), 4539844);
+    assert.equal(await lastIngestedLedger(adapt(db), 'payments'), 4539844);
   });
 
   it('lets sibling jobs finish their tick when one fails', async () => {
@@ -493,7 +505,7 @@ describe('poll', () => {
 
     await assert.rejects(
       () =>
-        poll(db, client, {
+        poll(adapt(db), client, {
           jobs: ['payments', 'trustlines'],
           intervalSeconds: 30,
           maxTicks: 1,
@@ -503,7 +515,15 @@ describe('poll', () => {
       /effects unavailable/,
     );
 
-    assert.equal(lastIngestedLedger(db, 'payments'), 4539872, 'payments still committed');
-    assert.equal(lastIngestedLedger(db, 'trustlines'), undefined, 'trustlines made no progress');
+    assert.equal(
+      await lastIngestedLedger(adapt(db), 'payments'),
+      4539872,
+      'payments still committed',
+    );
+    assert.equal(
+      await lastIngestedLedger(adapt(db), 'trustlines'),
+      undefined,
+      'trustlines made no progress',
+    );
   });
 });

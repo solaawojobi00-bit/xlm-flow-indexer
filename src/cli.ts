@@ -5,6 +5,7 @@ import { loadAnchorIssuers } from './db/anchors.ts';
 import { openDb } from './db/client.ts';
 import { migrate } from './db/migrate.ts';
 import { migratePostgres } from './db/postgres.ts';
+import { sqliteAdapter } from './db/sqlite-adapter.ts';
 import { HorizonClient } from './horizon/client.ts';
 import { poll } from './ingest/incremental.ts';
 import { ingestPayments } from './ingest/payments.ts';
@@ -304,10 +305,14 @@ async function runPoll(parsed: ParsedArgs): Promise<number> {
   console.log(`Jobs:     ${jobs.join(', ')}`);
 
   const db = openDb(parsed.db);
+  // `migrate` takes the handle directly -- it is the SQLite migration runner, and
+  // Postgres has its own in ./db/postgres.ts. Everything downstream of it goes
+  // through the engine-neutral seam instead.
+  const sql = sqliteAdapter(db);
   try {
     migrate(db);
 
-    const existing = allIngestState(db);
+    const existing = await allIngestState(sql);
     if (existing.length === 0) {
       console.log('Watermarks: none recorded yet');
     } else {
@@ -327,7 +332,7 @@ async function runPoll(parsed: ParsedArgs): Promise<number> {
     process.once('SIGTERM', onSignal);
 
     try {
-      await poll(db, client, {
+      await poll(sql, client, {
         jobs,
         intervalSeconds,
         maxTicks: parsed.once ? 1 : parsed.maxTicks,
@@ -459,6 +464,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
 
     try {
       const db = openDb(parsed.db);
+      const sql = sqliteAdapter(db);
       try {
         // Ensure migrations applied
         migrate(db);
@@ -469,26 +475,26 @@ export async function runCli(argv: readonly string[]): Promise<number> {
             console.error(`Error: Anchors config file not found: "${parsed.anchors}"`);
             return 1;
           }
-          const loaded = loadAnchorIssuers(db, parsed.anchors);
+          const loaded = await loadAnchorIssuers(sql, parsed.anchors);
           console.log(`Loaded ${loaded} anchor issuer(s) from "${parsed.anchors}".`);
         }
 
         for (const job of parsed.jobs) {
           if (job === 'payments') {
             console.log('\n[payments] Ingesting payment operations...');
-            const res = await ingestPayments(db, client, range);
+            const res = await ingestPayments(sql, client, range);
             console.log(
               `[payments] Done: ${res.operationsScanned} ops scanned, ${res.paymentsWritten}/${res.paymentsSeen} payments written, ${res.accountsWritten} accounts, ${res.ledgersWritten} ledgers.`,
             );
           } else if (job === 'trustlines') {
             console.log('\n[trustlines] Ingesting trustline establishments...');
-            const res = await ingestTrustlines(db, client, range);
+            const res = await ingestTrustlines(sql, client, range);
             console.log(
               `[trustlines] Done: ${res.effectsScanned} effects scanned, ${res.trustlinesWritten}/${res.trustlinesSeen} trustlines written, ${res.accountsWritten} accounts.`,
             );
           } else if (job === 'trades') {
             console.log('\n[trades] Ingesting DEX trades...');
-            const res = await ingestTrades(db, client, range);
+            const res = await ingestTrades(sql, client, range);
             console.log(
               `[trades] Done: ${res.tradesSeen} trades seen (${res.orderbookTrades} orderbook, ${res.liquidityPoolTrades} pool), ${res.tradesWritten} trades written, ${res.ledgersWritten} ledgers.`,
             );

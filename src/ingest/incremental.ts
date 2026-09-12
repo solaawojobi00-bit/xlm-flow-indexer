@@ -1,4 +1,4 @@
-import type { Db } from '../db/client.ts';
+import type { SqlAdapter } from '../db/adapter.ts';
 import type { HorizonClient } from '../horizon/client.ts';
 import type { LedgerRange } from './payments.ts';
 import { ingestPayments } from './payments.ts';
@@ -106,7 +106,7 @@ export interface IncrementalPassResult {
 }
 
 async function runJob(
-  db: Db,
+  db: SqlAdapter,
   client: HorizonClient,
   job: IngestJob,
   range: LedgerRange,
@@ -129,13 +129,13 @@ async function runJob(
  * because every insert is ON CONFLICT DO NOTHING (issue #6).
  */
 export async function ingestIncrementalPass(
-  db: Db,
+  db: SqlAdapter,
   client: HorizonClient,
   job: IngestJob,
   options: IncrementalOptions = {},
 ): Promise<IncrementalPassResult> {
   const latestLedger = await client.latestLedger();
-  const lastLedger = lastIngestedLedger(db, job);
+  const lastLedger = await lastIngestedLedger(db, job);
   const range = nextRange(lastLedger, latestLedger, options);
 
   if (!range) {
@@ -143,9 +143,9 @@ export async function ingestIncrementalPass(
   }
 
   await runJob(db, client, job, range);
-  recordIngestedLedger(db, job, range.toLedger);
+  await recordIngestedLedger(db, job, range.toLedger);
 
-  return { job, range, latestLedger, lastLedger: lastIngestedLedger(db, job) };
+  return { job, range, latestLedger, lastLedger: await lastIngestedLedger(db, job) };
 }
 
 export interface PollOptions extends IncrementalOptions {
@@ -192,7 +192,7 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
  * runtime, a scheduled workflow) rather than being reinvented here.
  */
 export async function poll(
-  db: Db,
+  db: SqlAdapter,
   client: HorizonClient,
   options: PollOptions,
 ): Promise<IncrementalPassResult[]> {

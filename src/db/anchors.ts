@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-import type { Db } from './client.ts';
+import type { SqlAdapter } from './adapter.ts';
 
 export interface AnchorIssuerConfig {
   readonly account_id: string;
@@ -16,10 +16,10 @@ export interface AnchorIssuerConfig {
  *
  * @returns Number of anchor issuers processed.
  */
-export function loadAnchorIssuers(
-  db: Db,
+export async function loadAnchorIssuers(
+  db: SqlAdapter,
   configOrPath: string | readonly AnchorIssuerConfig[],
-): number {
+): Promise<number> {
   let entries: readonly AnchorIssuerConfig[];
 
   if (typeof configOrPath === 'string') {
@@ -29,23 +29,29 @@ export function loadAnchorIssuers(
     entries = configOrPath;
   }
 
-  const upsert = db.prepare(`
+  const upsert = `
     INSERT INTO anchor_issuers (account_id, name, home_domain)
     VALUES (?, ?, ?)
     ON CONFLICT (account_id) DO UPDATE SET
       name = excluded.name,
       home_domain = excluded.home_domain
-  `);
+  `;
 
-  const runAll = db.transaction(() => {
+  // All-or-nothing, as before: a config file with a bad entry half way down must
+  // not leave the earlier half applied. The rejection is what the transaction is
+  // protecting against, so the validation stays inside it.
+  await db.transaction(async (tx) => {
     for (const entry of entries) {
       if (!entry.account_id || entry.account_id.trim() === '') {
         throw new Error('Anchor issuer account_id cannot be empty.');
       }
-      upsert.run(entry.account_id.trim(), entry.name ?? null, entry.home_domain ?? null);
+      await tx.run(upsert, [
+        entry.account_id.trim(),
+        entry.name ?? null,
+        entry.home_domain ?? null,
+      ]);
     }
   });
 
-  runAll();
   return entries.length;
 }

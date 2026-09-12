@@ -6,6 +6,7 @@ import { appliedMigrations, migrate } from '../../src/db/migrate.ts';
 import { HorizonClient } from '../../src/horizon/client.ts';
 import { ledgerOf } from '../../src/horizon/toid.ts';
 import { ingestTrades, TRADE_TYPES } from '../../src/ingest/trades.ts';
+import { adapt } from '../helpers/adapter.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 
 const fixture = loadFixture('testnet-trades-4534150-4534300');
@@ -106,7 +107,7 @@ describe('migration 002', () => {
 describe('ingestTrades against recorded testnet data', () => {
   it('ingests the pinned range', async () => {
     const db = freshDb();
-    const result = await ingestTrades(db, client(), range());
+    const result = await ingestTrades(adapt(db), client(), range());
 
     assert.equal(result.tradesSeen, 12);
     assert.equal(result.tradesWritten, 12);
@@ -120,7 +121,7 @@ describe('ingestTrades against recorded testnet data', () => {
     // half of all trades sampled on testnet, so dropping them would discard about
     // half of DEX activity that PRD.md names as a goal.
     const db = freshDb();
-    const result = await ingestTrades(db, client(), range());
+    const result = await ingestTrades(adapt(db), client(), range());
 
     assert.equal(result.orderbookTrades, 9);
     assert.equal(result.liquidityPoolTrades, 3);
@@ -141,7 +142,7 @@ describe('ingestTrades against recorded testnet data', () => {
     // automated-market-maker swap on the same pair are different events, and #10 must
     // be able to group or separate them deliberately rather than summing them blind.
     const db = freshDb();
-    await ingestTrades(db, client(), range());
+    await ingestTrades(adapt(db), client(), range());
 
     const nativeCetes = db
       .prepare(
@@ -159,7 +160,7 @@ describe('ingestTrades against recorded testnet data', () => {
 
   it('normalises native on either side to native with an empty issuer', async () => {
     const db = freshDb();
-    await ingestTrades(db, client(), range());
+    await ingestTrades(adapt(db), client(), range());
 
     const nulls = (
       db
@@ -186,7 +187,7 @@ describe('ingestTrades against recorded testnet data', () => {
 
   it('records the real asset pairs from testnet', async () => {
     const db = freshDb();
-    await ingestTrades(db, client(), range());
+    await ingestTrades(adapt(db), client(), range());
 
     const codes = (
       db
@@ -203,7 +204,7 @@ describe('ingestTrades against recorded testnet data', () => {
 
   it('stores amounts exactly as Horizon sent them', async () => {
     const db = freshDb();
-    await ingestTrades(db, client(), range());
+    await ingestTrades(adapt(db), client(), range());
 
     const tradesPage = fixture.responses[
       `/trades?cursor=${((BigInt(fixture.fromLedger) << 32n) - 1n).toString()}&order=asc&limit=200`
@@ -242,10 +243,10 @@ describe('ingestTrades against recorded testnet data', () => {
 
   it('is idempotent: re-ingesting the same range writes nothing', async () => {
     const db = freshDb();
-    await ingestTrades(db, client(), range());
+    await ingestTrades(adapt(db), client(), range());
     const before = (db.prepare('SELECT COUNT(*) c FROM trades').get() as { c: number }).c;
 
-    const second = await ingestTrades(db, client(), range());
+    const second = await ingestTrades(adapt(db), client(), range());
 
     assert.equal(second.tradesWritten, 0);
     assert.equal(second.ledgersWritten, 0);
@@ -256,7 +257,7 @@ describe('ingestTrades against recorded testnet data', () => {
 
   it('writes ledger parents so the foreign key resolves', async () => {
     const db = freshDb();
-    await ingestTrades(db, client(), range());
+    await ingestTrades(adapt(db), client(), range());
 
     assert.deepEqual(db.pragma('foreign_key_check'), []);
 
@@ -274,7 +275,7 @@ describe('ingestTrades against recorded testnet data', () => {
 
   it('stops at toLedger', async () => {
     const db = freshDb();
-    const narrow = await ingestTrades(db, client(), {
+    const narrow = await ingestTrades(adapt(db), client(), {
       fromLedger: fixture.fromLedger,
       toLedger: fixture.fromLedger + 40,
     });
@@ -286,7 +287,7 @@ describe('ingestTrades against recorded testnet data', () => {
   it('rejects an inverted range', async () => {
     const db = freshDb();
     await assert.rejects(
-      () => ingestTrades(db, client(), { fromLedger: 100, toLedger: 50 }),
+      () => ingestTrades(adapt(db), client(), { fromLedger: 100, toLedger: 50 }),
       RangeError,
     );
     db.close();
@@ -319,7 +320,7 @@ describe('trade type handling', () => {
     try {
       const db = freshDb();
       const result = await ingestTrades(
-        db,
+        adapt(db),
         new HorizonClient({ baseUrl: altServer.baseUrl }),
         range(),
       );

@@ -1,4 +1,4 @@
-import type { Db } from '../db/client.ts';
+import type { SqlAdapter } from '../db/adapter.ts';
 import type { HorizonClient } from '../horizon/client.ts';
 import { cursorBeforeLedger, ledgerOf } from '../horizon/toid.ts';
 import type { LedgerRange } from './payments.ts';
@@ -44,7 +44,7 @@ export interface TrustlineIngestResult {
  * than a mutable column here.
  */
 export async function ingestTrustlines(
-  db: Db,
+  db: SqlAdapter,
   client: HorizonClient,
   range: LedgerRange,
 ): Promise<TrustlineIngestResult> {
@@ -54,13 +54,9 @@ export async function ingestTrustlines(
     );
   }
 
-  const insertAccount = db.prepare(
-    'INSERT INTO accounts (account_id) VALUES (?) ON CONFLICT DO NOTHING',
-  );
-  const insertTrustline = db.prepare(
-    `INSERT INTO trustlines (account_id, asset_code, asset_issuer, established_at)
-     VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-  );
+  const insertAccount = 'INSERT INTO accounts (account_id) VALUES (?) ON CONFLICT DO NOTHING';
+  const insertTrustline = `INSERT INTO trustlines (account_id, asset_code, asset_issuer, established_at)
+     VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`;
 
   let effectsScanned = 0;
   let trustlinesSeen = 0;
@@ -87,13 +83,10 @@ export async function ingestTrustlines(
     trustlinesSeen += 1;
 
     // Parent before child, so the foreign key holds.
-    accountsWritten += insertAccount.run(effect.account).changes;
-    trustlinesWritten += insertTrustline.run(
-      effect.account,
-      asset.code,
-      asset.issuer,
-      effect.created_at,
-    ).changes;
+    accountsWritten += (await db.run(insertAccount, [effect.account])).rowsAffected;
+    trustlinesWritten += (
+      await db.run(insertTrustline, [effect.account, asset.code, asset.issuer, effect.created_at])
+    ).rowsAffected;
   }
 
   return { effectsScanned, trustlinesSeen, accountsWritten, trustlinesWritten };

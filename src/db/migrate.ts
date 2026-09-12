@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { isoStringOf } from './adapter.ts';
 import type { Db } from './client.ts';
 import { render, SQLITE, type Dialect } from './dialect.ts';
 
@@ -112,9 +113,9 @@ function ensureTrackingTable(db: Db): void {
  *
  * Exists because the two drivers hand back different JavaScript types for the
  * same logical row: `applied_at` is TEXT in SQLite and arrives as a string, but
- * is TIMESTAMPTZ in Postgres and arrives as a `Date`. Both are normalised to an
- * ISO8601 string so callers -- and the parity checks in issue #53 -- compare
- * like with like rather than a string against a Date.
+ * is TIMESTAMPTZ in Postgres and arrives as a `Date`. `isoStringOf` settles that
+ * for both -- see ./adapter.ts -- so callers, and the parity checks in issue
+ * #53, compare like with like rather than a string against a Date.
  */
 export function appliedMigrationsFrom(rows: readonly unknown[]): AppliedMigration[] {
   return rows.map((row) => {
@@ -123,7 +124,7 @@ export function appliedMigrationsFrom(rows: readonly unknown[]): AppliedMigratio
       version: Number(r.version),
       name: r.name,
       checksum: r.checksum,
-      applied_at: r.applied_at instanceof Date ? r.applied_at.toISOString() : String(r.applied_at),
+      applied_at: isoStringOf(r.applied_at),
     };
   });
 }

@@ -9,6 +9,7 @@ import { ingestPayments } from '../../src/ingest/payments.ts';
 import { ingestTrades } from '../../src/ingest/trades.ts';
 import type { TrustlineIngestResult } from '../../src/ingest/trustlines.ts';
 import { ingestTrustlines } from '../../src/ingest/trustlines.ts';
+import { adapt } from '../helpers/adapter.ts';
 import {
   loadFixture,
   startFixtureServer,
@@ -196,11 +197,11 @@ function snapshot(db: Db): string {
 }
 
 const runPayments = (db: Db): Promise<unknown> =>
-  ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+  ingestPayments(adapt(db), clientFor(narrowServer), rangeOf(paymentsNarrow));
 const runTrustlines = (db: Db): Promise<unknown> =>
-  ingestTrustlines(db, clientFor(trustlinesServer), rangeOf(trustlinesFixture));
+  ingestTrustlines(adapt(db), clientFor(trustlinesServer), rangeOf(trustlinesFixture));
 const runTrades = (db: Db): Promise<unknown> =>
-  ingestTrades(db, clientFor(tradesServer), rangeOf(tradesFixture));
+  ingestTrades(adapt(db), clientFor(tradesServer), rangeOf(tradesFixture));
 
 const JOBS = {
   payments: runPayments,
@@ -243,13 +244,17 @@ describe('full re-ingest is a no-op', () => {
 
     // Every job reports what it actually wrote, so the guarantee can be asserted on the
     // jobs' own accounting as well as on the resulting rows.
-    const payments = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    const payments = await ingestPayments(
+      adapt(db),
+      clientFor(narrowServer),
+      rangeOf(paymentsNarrow),
+    );
     const trustlines = await ingestTrustlines(
-      db,
+      adapt(db),
       clientFor(trustlinesServer),
       rangeOf(trustlinesFixture),
     );
-    const trades = await ingestTrades(db, clientFor(tradesServer), rangeOf(tradesFixture));
+    const trades = await ingestTrades(adapt(db), clientFor(tradesServer), rangeOf(tradesFixture));
 
     assert.equal(payments.ledgersWritten, 0);
     assert.equal(payments.accountsWritten, 0);
@@ -295,7 +300,11 @@ describe('overlapping ranges', () => {
   it('adds only the genuinely new ledgers', async () => {
     const db = freshDb();
 
-    const narrow = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    const narrow = await ingestPayments(
+      adapt(db),
+      clientFor(narrowServer),
+      rangeOf(paymentsNarrow),
+    );
     assert.equal(narrow.ledgersWritten, 13);
     assert.equal(narrow.paymentsWritten, 8);
     assert.deepEqual(counts(db), {
@@ -307,7 +316,7 @@ describe('overlapping ranges', () => {
       trades: 0,
     });
 
-    const wide = await ingestPayments(db, clientFor(wideServer), rangeOf(paymentsWide));
+    const wide = await ingestPayments(adapt(db), clientFor(wideServer), rangeOf(paymentsWide));
 
     assert.equal(wide.ledgersWritten, 20, '33 ledgers in range, 13 already present');
     assert.equal(wide.operationsWritten, 8, '16 payment operations in range, 8 already present');
@@ -329,14 +338,14 @@ describe('overlapping ranges', () => {
 
   it('leaves the rows in the overlap byte-for-byte unchanged', async () => {
     const db = freshDb();
-    await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    await ingestPayments(adapt(db), clientFor(narrowServer), rangeOf(paymentsNarrow));
 
     const overlapBefore = db
       .prepare(`SELECT * FROM ledgers WHERE sequence BETWEEN 4539850 AND 4539862 ORDER BY sequence`)
       .all();
     const paymentsBefore = db.prepare('SELECT * FROM payments ORDER BY operation_id').all();
 
-    await ingestPayments(db, clientFor(wideServer), rangeOf(paymentsWide));
+    await ingestPayments(adapt(db), clientFor(wideServer), rangeOf(paymentsWide));
 
     const overlapAfter = db
       .prepare(`SELECT * FROM ledgers WHERE sequence BETWEEN 4539850 AND 4539862 ORDER BY sequence`)
@@ -428,7 +437,7 @@ describe('shared parent rows', () => {
     db.prepare('INSERT INTO accounts (account_id) VALUES (?)').run(TRUSTLINE_ACCOUNT);
 
     const result = await ingestTrustlines(
-      db,
+      adapt(db),
       clientFor(trustlinesServer),
       rangeOf(trustlinesFixture),
     );
@@ -443,8 +452,12 @@ describe('shared parent rows', () => {
     // disjoint, so this asserts the additive case; the overlapping case is covered by
     // the widened payments range above.
     const db = freshDb();
-    const payments = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
-    const trades = await ingestTrades(db, clientFor(tradesServer), rangeOf(tradesFixture));
+    const payments = await ingestPayments(
+      adapt(db),
+      clientFor(narrowServer),
+      rangeOf(paymentsNarrow),
+    );
+    const trades = await ingestTrades(adapt(db), clientFor(tradesServer), rangeOf(tradesFixture));
 
     assert.equal(payments.ledgersWritten, 13);
     assert.equal(trades.ledgersWritten, 151);
@@ -483,7 +496,7 @@ describe('cross-job shared parent contention', () => {
    * pass even if a job miscounted its own writes.
    */
   const runTrustlinesOverlapping = (db: Db): Promise<TrustlineIngestResult> =>
-    ingestTrustlines(db, clientFor(overlapServer), rangeOf(trustlinesFixture));
+    ingestTrustlines(adapt(db), clientFor(overlapServer), rangeOf(trustlinesFixture));
 
   /**
    * One account fewer than `EXPECTED_COUNTS`, which is the whole point: the payments
@@ -502,7 +515,11 @@ describe('cross-job shared parent contention', () => {
   it('attributes the shared account to payments when payments runs first', async () => {
     const db = freshDb();
 
-    const payments = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    const payments = await ingestPayments(
+      adapt(db),
+      clientFor(narrowServer),
+      rangeOf(paymentsNarrow),
+    );
     const trustlines = await runTrustlinesOverlapping(db);
 
     assert.equal(payments.accountsWritten, 4, 'payments inserts all four of its accounts');
@@ -527,7 +544,11 @@ describe('cross-job shared parent contention', () => {
     const db = freshDb();
 
     const trustlines = await runTrustlinesOverlapping(db);
-    const payments = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    const payments = await ingestPayments(
+      adapt(db),
+      clientFor(narrowServer),
+      rangeOf(paymentsNarrow),
+    );
 
     // The mirror image of the case above: the same shared row, credited to the other
     // job. This is the assertion that would catch an upsert whose accounting depended on
@@ -548,12 +569,12 @@ describe('cross-job shared parent contention', () => {
 
   it('converges on identical state whichever job wrote the shared account first', async () => {
     const paymentsFirst = freshDb();
-    await ingestPayments(paymentsFirst, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    await ingestPayments(adapt(paymentsFirst), clientFor(narrowServer), rangeOf(paymentsNarrow));
     await runTrustlinesOverlapping(paymentsFirst);
 
     const trustlinesFirst = freshDb();
     await runTrustlinesOverlapping(trustlinesFirst);
-    await ingestPayments(trustlinesFirst, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    await ingestPayments(adapt(trustlinesFirst), clientFor(narrowServer), rangeOf(paymentsNarrow));
 
     // Write counts differ between these two runs, as asserted above. The resulting rows
     // must not.
@@ -564,11 +585,15 @@ describe('cross-job shared parent contention', () => {
     // The shared row is the one most likely to be rewritten on a second pass, since two
     // separate writers both claim it.
     const db = freshDb();
-    await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    await ingestPayments(adapt(db), clientFor(narrowServer), rangeOf(paymentsNarrow));
     await runTrustlinesOverlapping(db);
     const baseline = snapshot(db);
 
-    const payments = await ingestPayments(db, clientFor(narrowServer), rangeOf(paymentsNarrow));
+    const payments = await ingestPayments(
+      adapt(db),
+      clientFor(narrowServer),
+      rangeOf(paymentsNarrow),
+    );
     const trustlines = await runTrustlinesOverlapping(db);
 
     assert.equal(payments.accountsWritten, 0);
