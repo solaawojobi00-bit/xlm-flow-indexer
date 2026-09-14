@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
 
+import type { SqlAdapter } from './db/adapter.ts';
 import { loadAnchorIssuers } from './db/anchors.ts';
 import { openDb } from './db/client.ts';
 import { migrate } from './db/migrate.ts';
+import { pgAdapter } from './db/pg-adapter.ts';
 import { migratePostgres } from './db/postgres.ts';
 import { sqliteAdapter } from './db/sqlite-adapter.ts';
 import { HorizonClient } from './horizon/client.ts';
@@ -40,7 +42,9 @@ Command: ingest
   Options:
     --from <sequence>     Starting ledger sequence (required, integer > 0)
     --to <sequence>       Ending ledger sequence (required, integer >= from)
-    --db <path>           Path to the SQLite database file (required)
+    --db <path>           Path to the SQLite database file (required unless --postgres)
+    --postgres <url>      Ingest into a Postgres database instead, e.g.
+                          postgres://user:pass@host:5432/dbname
     --horizon <url>       Horizon base URL (default: https://horizon-testnet.stellar.org)
     --anchors <path>      Optional path to anchor issuers config JSON to populate
     --jobs <list>         Comma-separated list of jobs: payments,trustlines,trades (default: all)
@@ -59,7 +63,9 @@ Command: poll
   statements and leaves the watermark untouched.
 
   Options:
-    --db <path>           Path to the SQLite database file (required)
+    --db <path>           Path to the SQLite database file (required unless --postgres)
+    --postgres <url>      Poll into a Postgres database instead, e.g.
+                          postgres://user:pass@host:5432/dbname
     --interval <seconds>  Seconds between ticks (default: 30)
     --start-ledger <n>    Where to begin when a job has no watermark yet.
                           Required on a job's first run, so a first poll cannot
@@ -76,8 +82,10 @@ Examples:
   xlm-flow-indexer migrate --postgres postgres://localhost:5432/xlm
   xlm-flow-indexer ingest --from 4539850 --to 4539862 --db ./indexer.db
   xlm-flow-indexer ingest --from 4539850 --to 4539862 --db ./indexer.db --jobs payments,trades
+  xlm-flow-indexer ingest --from 4539850 --to 4539862 --postgres postgres://localhost:5432/xlm
   xlm-flow-indexer poll --db ./indexer.db --start-ledger 4539850 --interval 30
   xlm-flow-indexer poll --db ./indexer.db --once
+  xlm-flow-indexer poll --postgres postgres://localhost:5432/xlm --once
 `;
 
 export type IngestJobName = 'payments' | 'trustlines' | 'trades';
@@ -232,26 +240,122 @@ export function parseCliArgs(args: readonly string[]): ParsedArgs {
   };
 }
 
+type PgClient = import('pg').Client;
+
 /**
- * Apply migrations to Postgres.
+ * Connect to Postgres.
  *
- * `pg` is imported dynamically so the SQLite path -- which is every current
- * command other than this one -- does not pay to load a driver it never uses,
- * and so a SQLite-only deployment is unaffected if the driver is absent.
+ * `pg` is imported dynamically so the SQLite path does not pay to load a driver
+ * it never uses, and so a SQLite-only deployment is unaffected if the driver is
+ * absent.
  */
-async function migrateToPostgres(connectionString: string): Promise<number> {
+async function connectPostgres(connectionString: string): Promise<PgClient> {
   const { Client } = await import('pg');
   const client = new Client({ connectionString });
+  await client.connect();
+  return client;
+}
 
+/**
+ * A Postgres connection string with its password masked.
+ *
+ * Every command prints the database it is about to write to, and for Postgres
+ * that string routinely carries credentials. Printing it verbatim would put them
+ * in terminal scrollback, in CI logs, and in whatever collects those — so the
+ * banner gets this instead.
+ *
+ * A string `URL` cannot parse is reported as the bare scheme rather than passed
+ * through, because the reason it failed to parse might be the password.
+ */
+export function redactConnectionString(connectionString: string): string {
   try {
-    await client.connect();
+    const url = new URL(connectionString);
+    if (url.password) url.password = '***';
+    return url.href;
+  } catch {
+    return '<unparseable connection string>';
+  }
+}
+
+/** What the banner calls the database, without needing a connection first. */
+function targetLabel(parsed: ParsedArgs): string {
+  return parsed.postgres ? redactConnectionString(parsed.postgres) : (parsed.db ?? '');
+}
+
+/**
+ * Reject the flag combinations no command accepts.
+ *
+ * One rule in one place: `migrate` has had it since #48 and `ingest`/`poll`
+ * inherit exactly it, rather than growing a near-copy each.
+ */
+function engineProblem(parsed: ParsedArgs): string | undefined {
+  if (parsed.db && parsed.postgres) {
+    return 'Error: Pass either --db or --postgres, not both.';
+  }
+  if (!parsed.db && !parsed.postgres) {
+    return 'Error: Missing required argument: one of --db <path> or --postgres <url>';
+  }
+  return undefined;
+}
+
+/**
+ * An open database, whichever engine it is, ready for a job to write to.
+ *
+ * The engine branch is not only "which adapter" — it is also "which migration
+ * runner", because `migrate` in ./db/migrate.ts takes a raw better-sqlite3
+ * handle while `migratePostgres` takes a client. Resolving both here means
+ * `ingest` and `poll` read identically and neither grows a second `if`.
+ */
+interface IngestionTarget {
+  readonly sql: SqlAdapter;
+  /** Apply pending migrations with this engine's runner. Returns versions applied. */
+  migrate(): Promise<number[]>;
+  /** Release the connection. Closes the underlying handle or client. */
+  close(): Promise<void>;
+}
+
+async function openIngestionTarget(parsed: ParsedArgs): Promise<IngestionTarget> {
+  if (parsed.postgres) {
+    const client = await connectPostgres(parsed.postgres);
+    // The adapter owns the client: nothing else here holds a reference, so the
+    // `finally` that closes the target is the only place it can be released.
+    const sql = pgAdapter(client, { closeConnection: true });
+    return {
+      sql,
+      migrate: () => migratePostgres(client),
+      close: () => sql.close(),
+    };
+  }
+
+  const db = openDb(parsed.db!);
+  const sql = sqliteAdapter(db, { closeHandle: true });
+  return {
+    sql,
+    // `migrate` is the SQLite runner and takes the handle directly. Everything
+    // downstream of it goes through the engine-neutral seam instead.
+    migrate: () => Promise.resolve(migrate(db)),
+    close: () => sql.close(),
+  };
+}
+
+/** Apply migrations, for the `migrate` command. */
+async function runMigrate(parsed: ParsedArgs): Promise<number> {
+  const problem = engineProblem(parsed);
+  if (problem) {
+    console.error(problem);
+    return 1;
+  }
+
+  let target: IngestionTarget;
+  try {
+    target = await openIngestionTarget(parsed);
   } catch (err) {
-    console.error(`Migration failed: could not connect to Postgres: ${(err as Error).message}`);
+    console.error(`Migration failed: could not open ${targetLabel(parsed)}: ${errorText(err)}`);
     return 1;
   }
 
   try {
-    const applied = await migratePostgres(client);
+    const applied = await target.migrate();
     if (applied.length === 0) {
       console.log('No pending migrations.');
     } else {
@@ -259,11 +363,15 @@ async function migrateToPostgres(connectionString: string): Promise<number> {
     }
     return 0;
   } catch (err) {
-    console.error(`Migration failed: ${(err as Error).message}`);
+    console.error(`Migration failed: ${errorText(err)}`);
     return 1;
   } finally {
-    await client.end();
+    await target.close();
   }
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Validate a numeric CLI flag, returning an error message or undefined. */
@@ -276,8 +384,9 @@ function invalidPositive(name: string, value: number | undefined, min: number): 
 }
 
 async function runPoll(parsed: ParsedArgs): Promise<number> {
-  if (!parsed.db) {
-    console.error('Error: Missing required argument --db <path>');
+  const engine = engineProblem(parsed);
+  if (engine) {
+    console.error(engine);
     return 1;
   }
 
@@ -300,17 +409,21 @@ async function runPoll(parsed: ParsedArgs): Promise<number> {
   const jobs = parsed.jobs as IngestJob[];
 
   console.log(`Polling every ${String(intervalSeconds)}s`);
-  console.log(`Database: ${parsed.db}`);
+  console.log(`Database: ${targetLabel(parsed)}`);
   console.log(`Horizon:  ${horizonUrl}`);
   console.log(`Jobs:     ${jobs.join(', ')}`);
 
-  const db = openDb(parsed.db);
-  // `migrate` takes the handle directly -- it is the SQLite migration runner, and
-  // Postgres has its own in ./db/postgres.ts. Everything downstream of it goes
-  // through the engine-neutral seam instead.
-  const sql = sqliteAdapter(db);
+  let target: IngestionTarget;
   try {
-    migrate(db);
+    target = await openIngestionTarget(parsed);
+  } catch (err) {
+    console.error(`\nPolling failed: could not open ${targetLabel(parsed)}: ${errorText(err)}`);
+    return 1;
+  }
+
+  const sql = target.sql;
+  try {
+    await target.migrate();
 
     const existing = await allIngestState(sql);
     if (existing.length === 0) {
@@ -360,10 +473,13 @@ async function runPoll(parsed: ParsedArgs): Promise<number> {
       process.removeListener('SIGTERM', onSignal);
     }
   } catch (err) {
-    console.error(`\nPolling failed: ${(err as Error).message}`);
+    console.error(`\nPolling failed: ${errorText(err)}`);
     return 1;
   } finally {
-    db.close();
+    // Reached on success, on failure, and after SIGINT -- the signal handler
+    // aborts the loop and `poll` returns rather than exiting, so cleanup is not
+    // skipped on the way out.
+    await target.close();
   }
 }
 
@@ -387,36 +503,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
   }
 
   if (parsed.command === 'migrate') {
-    if (parsed.postgres) {
-      if (parsed.db) {
-        console.error('Error: Pass either --db or --postgres, not both.');
-        return 1;
-      }
-      return await migrateToPostgres(parsed.postgres);
-    }
-
-    if (!parsed.db) {
-      console.error('Error: Missing required argument --db <path>');
-      return 1;
-    }
-
-    try {
-      const db = openDb(parsed.db);
-      try {
-        const applied = migrate(db);
-        if (applied.length === 0) {
-          console.log('No pending migrations.');
-        } else {
-          console.log(`Applied ${applied.length} migration(s): ${applied.join(', ')}`);
-        }
-        return 0;
-      } finally {
-        db.close();
-      }
-    } catch (err) {
-      console.error(`Migration failed: ${(err as Error).message}`);
-      return 1;
-    }
+    return await runMigrate(parsed);
   }
 
   if (parsed.command === 'poll') {
@@ -424,8 +511,9 @@ export async function runCli(argv: readonly string[]): Promise<number> {
   }
 
   if (parsed.command === 'ingest') {
-    if (!parsed.db) {
-      console.error('Error: Missing required argument --db <path>');
+    const engine = engineProblem(parsed);
+    if (engine) {
+      console.error(engine);
       return 1;
     }
     if (
@@ -458,16 +546,23 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     const client = new HorizonClient({ baseUrl: horizonUrl });
 
     console.log(`Starting ingestion over ledgers ${range.fromLedger}..${range.toLedger}`);
-    console.log(`Database: ${parsed.db}`);
+    console.log(`Database: ${targetLabel(parsed)}`);
     console.log(`Horizon:  ${horizonUrl}`);
     console.log(`Jobs:     ${parsed.jobs.join(', ')}`);
 
+    let target: IngestionTarget;
     try {
-      const db = openDb(parsed.db);
-      const sql = sqliteAdapter(db);
+      target = await openIngestionTarget(parsed);
+    } catch (err) {
+      console.error(`\nIngestion failed: could not open ${targetLabel(parsed)}: ${errorText(err)}`);
+      return 1;
+    }
+
+    try {
+      const sql = target.sql;
       try {
         // Ensure migrations applied
-        migrate(db);
+        await target.migrate();
 
         // Load anchors if specified
         if (parsed.anchors) {
@@ -504,10 +599,10 @@ export async function runCli(argv: readonly string[]): Promise<number> {
         console.log('\nIngestion completed successfully.');
         return 0;
       } finally {
-        db.close();
+        await target.close();
       }
     } catch (err) {
-      console.error(`\nIngestion failed: ${(err as Error).message}`);
+      console.error(`\nIngestion failed: ${errorText(err)}`);
       return 1;
     }
   }

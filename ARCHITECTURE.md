@@ -262,19 +262,43 @@ had stopped being portable.
 
 ### What is not yet dual-dialect
 
-The **schema, its migrations, the job logic and both adapters** are in place.
-What is missing is the wiring: `ingest` and `poll` still accept only `--db` and
-construct a `sqliteAdapter` unconditionally, so there is no way to *ask* for the
-Postgres path even though the code behind it now runs. CI proves it runs — the
-`postgres` job ingests the payments fixture end to end through `pgAdapter`.
+The schema, its migrations, the job logic, both adapters and the CLI wiring are
+all in place. `migrate`, `ingest` and `poll` each take `--db <path>` or
+`--postgres <url>`, and the `postgres` CI job runs ingestion and a poll tick
+end to end against a real server. Live ingestion into Postgres is supported.
 
-That gap is one CLI branch, tracked in #73. Until it closes, the Postgres path
-is schema creation plus the migration/parity work in #53.
+Two things remain genuinely engine-dependent, both tracked:
 
-Separately, the jobs autocommit per statement, as they always have. That is
-fine for SQLite and will be a round-trip per row against Postgres; bounded
-per-page batching is deliberately left to its own change (#68), since it alters
-failure semantics rather than just performance.
+- **Analytical views are plain `CREATE VIEW` in both engines.** Postgres
+  materialized views, the unique indexes `REFRESH … CONCURRENTLY` requires, and
+  a refresh strategy are #51. This is the point where the two backends are
+  *meant* to diverge in behaviour rather than merely in syntax.
+- **The jobs autocommit per statement**, as they always have. Fine for SQLite;
+  against Postgres it is a network round-trip per row. Bounded per-page batching
+  is #68, deliberately separate because it alters failure semantics rather than
+  just performance.
+
+There is also no tooling yet for moving an already-populated SQLite database to
+Postgres — runbook and parity dry-run are #53.
+
+### How a command picks its engine
+
+`openIngestionTarget` in `src/cli.ts` resolves the flag to an `IngestionTarget`:
+an `SqlAdapter`, a `migrate()` bound to that engine's runner, and a `close()`.
+The branch is not only "which adapter" — `migrate` in `src/db/migrate.ts` takes a
+raw better-sqlite3 handle while `migratePostgres` takes a client — so resolving
+both in one place is what keeps `ingest` and `poll` from each growing a second
+`if`.
+
+The adapter owns the connection in both cases (`closeHandle` / `closeConnection`),
+so the `finally` that closes the target is the single release point, reached on
+success, on failure, and after SIGINT.
+
+A Postgres connection string routinely carries credentials and the startup banner
+prints the database it is about to write to, so the banner gets
+`redactConnectionString` — password masked, and a string `URL` cannot parse
+reported as unparseable rather than echoed, since the reason it failed to parse
+might be the password.
 
 ## Query API (Phase 3, stretch)
 
