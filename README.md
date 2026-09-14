@@ -61,7 +61,8 @@ node src/cli.ts ingest --from 4539850 --to 4539862 --db ./indexer.db --anchors c
 
 - `--from <sequence>`: Starting ledger sequence (integer > 0, required).
 - `--to <sequence>`: Ending ledger sequence (integer >= from, required).
-- `--db <path>`: Path to the SQLite database file (required).
+- `--db <path>`: Path to the SQLite database file (required unless `--postgres`).
+- `--postgres <url>`: Ingest into Postgres instead, e.g. `postgres://user:pass@host:5432/dbname`. Mutually exclusive with `--db`.
 - `--horizon <url>`: Horizon base URL (default: `https://horizon-testnet.stellar.org`).
 - `--anchors <path>`: Optional JSON file defining known anchor issuer accounts.
 - `--jobs <list>`: Comma-separated list of jobs to run (`payments`, `trustlines`, `trades`). Default: all jobs.
@@ -70,6 +71,26 @@ node src/cli.ts ingest --from 4539850 --to 4539862 --db ./indexer.db --anchors c
 - `--trades`: Ingest orderbook and liquidity pool trades only.
 
 Ingestion is fully idempotent — running ingestion multiple times over the same ledger range safely ignores duplicate records without duplicating database rows.
+
+#### Running against Postgres
+
+Every command takes `--postgres <url>` in place of `--db <path>`, and applies
+pending migrations on start with that engine's runner:
+
+```bash
+node src/cli.ts migrate --postgres postgres://localhost:5432/xlm
+node src/cli.ts ingest --from 4539850 --to 4539862 --postgres postgres://localhost:5432/xlm
+node src/cli.ts poll --postgres postgres://localhost:5432/xlm --start-ledger 4539850 --once
+```
+
+The jobs themselves are identical on both engines — they write through
+`SqlAdapter` rather than to a driver — so the range, the counts and the
+idempotency guarantee above do not change with the target. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the seam and the two adapters.
+
+Passing both `--db` and `--postgres` is an error rather than a precedence rule.
+Note that the connection string is echoed in the startup banner with its
+password masked.
 
 ### 3. Poll for new ledgers (incremental ingestion)
 
@@ -96,7 +117,8 @@ SELECT job, last_ledger, updated_at FROM ingest_state ORDER BY job;
 
 #### CLI Poll Options
 
-- `--db <path>`: Path to the SQLite database file (required).
+- `--db <path>`: Path to the SQLite database file (required unless `--postgres`).
+- `--postgres <url>`: Poll into Postgres instead. Mutually exclusive with `--db`.
 - `--interval <seconds>`: Seconds between ticks (default: `30`).
 - `--start-ledger <n>`: Where to begin when a job has no watermark yet. Required on a job's first run.
 - `--once`: Run a single tick and exit.

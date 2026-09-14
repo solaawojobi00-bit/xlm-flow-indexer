@@ -194,4 +194,4 @@ jobs:
       # suite here too, and a failure would no longer say which engine broke.
       # A new suite that needs a server has to be added to this list.
       - name: Postgres schema and constraint suite
-        run: node --test test/postgres.test.ts test/db/pg-adapter.test.ts
+        run: node --test test/postgres.test.ts test/db/pg-adapter.test.ts test/cli-postgres.test.ts
