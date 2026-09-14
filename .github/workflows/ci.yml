@@ -188,5 +188,10 @@ jobs:
 
       # Asserts the translated types and the issue #1 constraints against the
       # real engine, which is the part that cannot be checked without a server.
+      #
+      # Listed file by file rather than via `npm test` so this job stays the
+      # Postgres one: `npm test` with DATABASE_URL set would re-run every SQLite
+      # suite here too, and a failure would no longer say which engine broke.
+      # A new suite that needs a server has to be added to this list.
       - name: Postgres schema and constraint suite
-        run: node --test test/postgres.test.ts
+        run: node --test test/postgres.test.ts test/db/pg-adapter.test.ts
