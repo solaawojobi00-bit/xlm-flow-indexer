@@ -211,7 +211,7 @@ and independently testable:
 The jobs no longer touch a driver. `src/db/adapter.ts` defines `SqlAdapter` — a
 connection-level, async interface of `run` / `get` / `all` / `transaction` /
 `close` — and everything in `src/ingest/`, plus `src/db/anchors.ts`, is written
-against it. `src/db/sqlite-adapter.ts` is the one implementation today.
+against it. `src/db/sqlite-adapter.ts` and `src/db/pg-adapter.ts` implement it.
 
 Connection-level rather than a `prepare()` returning a statement handle: that
 shape would model a lifecycle only better-sqlite3 has. The one thing it bought —
@@ -225,10 +225,31 @@ Two details worth knowing:
   `rowCount`. Every "written" count an ingestion job reports is built from it,
   which is what makes those counts mean *written* rather than *seen* under
   `ON CONFLICT DO NOTHING`.
-- The adapter issues `BEGIN`/`COMMIT`/`ROLLBACK` itself rather than using
-  better-sqlite3's `db.transaction()`. That helper takes a *synchronous*
-  callback; handed an async one it would commit before any awaited statement had
-  run — a silent correctness bug, not a type error.
+- Both adapters issue `BEGIN`/`COMMIT`/`ROLLBACK` themselves. In SQLite that is
+  because better-sqlite3's `db.transaction()` takes a *synchronous* callback;
+  handed an async one it would commit before any awaited statement had run — a
+  silent correctness bug, not a type error. In Postgres there is no such helper
+  to misuse, but both refuse to nest, because a second `BEGIN` is a *warning*
+  Postgres shrugs off rather than an error, so an inner block would silently be
+  committing the outer one's work.
+- Placeholders are `?` in both dialects. pg wants `$1`, `$2`, so
+  `src/db/pg-adapter.ts` rewrites them — with a scanner rather than a
+  `replace(/\?/g, …)`, so a `?` inside a string literal, quoted identifier,
+  dollar-quoted string or comment is left alone. Parameters are still bound by
+  the driver; nothing is interpolated.
+
+### The Postgres adapter (#72)
+
+`pgAdapter` takes a *single connection*, never a `Pool`. A pool hands out an
+arbitrary connection per query, so `BEGIN` would open a transaction on one while
+the statements meant to be inside it ran on others and autocommitted — a
+`transaction()` that silently guarantees nothing. A caller holding a pool checks
+a client out and passes that.
+
+Two smaller normalisations: pg's `rowCount` is `null` for statements that carry
+no count and becomes `0`, since an `IngestResult` counter would otherwise turn
+into `NaN`; and booleans are bound natively, *not* converted to 1/0 the way the
+SQLite adapter must convert them.
 
 This is unrelated to `dialect.ts`, despite both existing because the engines
 differ. `dialect.ts` is compile-time `${token}` substitution over
@@ -241,12 +262,14 @@ had stopped being portable.
 
 ### What is not yet dual-dialect
 
-The **schema, its migrations, and the job logic** are engine-neutral. What is
-missing is the other adapter: there is no Postgres implementation of
-`SqlAdapter` yet, and `ingest`/`poll` still accept only `--db`. So the Postgres
-path remains schema creation plus the migration/parity work in #53 — not live
-ingestion. That is now a contained gap (one class and a CLI branch) rather than
-a refactor of every job.
+The **schema, its migrations, the job logic and both adapters** are in place.
+What is missing is the wiring: `ingest` and `poll` still accept only `--db` and
+construct a `sqliteAdapter` unconditionally, so there is no way to *ask* for the
+Postgres path even though the code behind it now runs. CI proves it runs — the
+`postgres` job ingests the payments fixture end to end through `pgAdapter`.
+
+That gap is one CLI branch, tracked in #73. Until it closes, the Postgres path
+is schema creation plus the migration/parity work in #53.
 
 Separately, the jobs autocommit per statement, as they always have. That is
 fine for SQLite and will be a round-trip per row against Postgres; bounded
