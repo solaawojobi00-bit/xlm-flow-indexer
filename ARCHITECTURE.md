@@ -267,19 +267,45 @@ all in place. `migrate`, `ingest` and `poll` each take `--db <path>` or
 `--postgres <url>`, and the `postgres` CI job runs ingestion and a poll tick
 end to end against a real server. Live ingestion into Postgres is supported.
 
-Two things remain genuinely engine-dependent, both tracked:
+One thing remains genuinely engine-dependent, and it is tracked:
 
 - **Analytical views are plain `CREATE VIEW` in both engines.** Postgres
   materialized views, the unique indexes `REFRESH … CONCURRENTLY` requires, and
   a refresh strategy are #51. This is the point where the two backends are
   *meant* to diverge in behaviour rather than merely in syntax.
-- **The jobs autocommit per statement**, as they always have. Fine for SQLite;
-  against Postgres it is a network round-trip per row. Bounded per-page batching
-  is #68, deliberately separate because it alters failure semantics rather than
-  just performance.
 
 There is also no tooling yet for moving an already-populated SQLite database to
 Postgres — runbook and parity dry-run are #53.
+
+### How ingestion writes commit
+
+The jobs commit in bounded batches rather than autocommitting each insert (#68).
+`src/ingest/batch.ts` holds the boundary: `batchesWithin` groups a job's record
+stream and stops it at the first record past the range, and each batch is one
+`SqlAdapter.transaction`. The bound is a **record count** (`DEFAULT_BATCH_RECORDS`,
+200), not a pass: `maxLedgersPerPass` caps a pass at 200 *ledgers*, which is an
+unbounded number of rows, so bounding the pass would reintroduce exactly the
+minutes-long transaction that cap exists to prevent.
+
+What a mid-pass failure means changed, in one direction only. It used to leave
+every row written so far committed; it now leaves every *completed batch*
+committed and rolls back the one in flight. The watermark is untouched either way,
+because `ingestIncrementalPass` advances it only after ingestion returns — so the
+next pass re-reads the whole range, and issue #6's `ON CONFLICT DO NOTHING`
+absorbs what survived and rewrites what did not. Batching therefore rests on
+idempotency rather than weakening it.
+
+Foreign keys hold across batch boundaries by construction, not by luck. The
+`accounts` parent of an operation, a payment or a trustline is written inside the
+same transaction as its child, so no boundary can fall between them. The `ledgers`
+parents are safe for a different reason: the ledger pass finishes and commits
+before the child pass opens its first transaction.
+
+The visible cost is a commit count. `scripts/bench-batching.ts` measures it by
+running the real job code twice — once through an adapter whose `transaction()`
+issues no `BEGIN`, reproducing the pre-#68 write pattern — and the `postgres` CI
+job runs it against the service container, where a commit is a durability barrier
+rather than nearly free.
 
 ### How a command picks its engine
 

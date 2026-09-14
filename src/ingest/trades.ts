@@ -2,6 +2,7 @@ import type { SqlAdapter } from '../db/adapter.ts';
 import type { HorizonClient } from '../horizon/client.ts';
 import { cursorBeforeLedger, ledgerOf } from '../horizon/toid.ts';
 import type { HorizonTrade } from '../horizon/types.ts';
+import { batchesWithin, batchSizeOf, type BatchOptions } from './batch.ts';
 import type { LedgerRange } from './payments.ts';
 
 /**
@@ -57,12 +58,14 @@ function tradeTypeOf(trade: HorizonTrade): string {
 /**
  * Ingest trades for a ledger range into `trades`, with their `ledgers` parents.
  *
- * Idempotent by primary key: a second run over the same range writes nothing.
+ * Idempotent by primary key: a second run over the same range writes nothing. Writes
+ * commit in bounded batches rather than one per row (issue #68); see ./batch.ts.
  */
 export async function ingestTrades(
   db: SqlAdapter,
   client: HorizonClient,
   range: LedgerRange,
+  options?: BatchOptions,
 ): Promise<TradeIngestResult> {
   if (range.toLedger < range.fromLedger) {
     throw new RangeError(
@@ -79,18 +82,33 @@ export async function ingestTrades(
        base_amount, counter_amount, executed_at, trade_type
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`;
 
+  const batchSize = batchSizeOf(options);
+
   // Ledger parents first, for the same reason as the payments job: trades reference
-  // ledgers(sequence) and foreign keys are enforced.
+  // ledgers(sequence) and foreign keys are enforced. This pass commits in full before
+  // the trades pass opens its first transaction, so a trade can never be committed
+  // ahead of the ledger it points at.
   let ledgersWritten = 0;
-  for await (const ledger of client.ledgers({
+  const ledgers = client.ledgers({
     cursor: cursorBeforeLedger(range.fromLedger),
     order: 'asc',
     limit: 200,
-  })) {
-    if (ledger.sequence > range.toLedger) break;
-    ledgersWritten += (
-      await db.run(insertLedger, [ledger.sequence, ledger.closed_at, ledger.operation_count])
-    ).rowsAffected;
+  });
+
+  for await (const batch of batchesWithin(
+    ledgers,
+    (ledger) => ledger.sequence <= range.toLedger,
+    batchSize,
+  )) {
+    ledgersWritten += await db.transaction(async (tx) => {
+      let inBatch = 0;
+      for (const ledger of batch) {
+        inBatch += (
+          await tx.run(insertLedger, [ledger.sequence, ledger.closed_at, ledger.operation_count])
+        ).rowsAffected;
+      }
+      return inBatch;
+    });
   }
 
   let tradesSeen = 0;
@@ -99,55 +117,79 @@ export async function ingestTrades(
   let liquidityPoolTrades = 0;
   let skippedUnknownType = 0;
 
-  for await (const trade of client.trades({
+  const trades = client.trades({
     cursor: cursorBeforeLedger(range.fromLedger),
     order: 'asc',
     limit: 200,
-  })) {
-    const ledgerSequence = ledgerOf(trade.paging_token);
-    if (ledgerSequence > range.toLedger) break;
+  });
 
-    const tradeType = tradeTypeOf(trade);
+  for await (const batch of batchesWithin(
+    trades,
+    (trade) => ledgerOf(trade.paging_token) <= range.toLedger,
+    batchSize,
+  )) {
+    const delta = await db.transaction(async (tx) => {
+      const counts = {
+        tradesSeen: 0,
+        tradesWritten: 0,
+        orderbookTrades: 0,
+        liquidityPoolTrades: 0,
+        skippedUnknownType: 0,
+      };
 
-    // A trade_type we do not model would violate the CHECK constraint and abort the
-    // run. Counting and skipping surfaces the new mechanism without losing the rest
-    // of the range -- and a non-zero count is the signal to add support for it.
-    if (!TRADE_TYPES.has(tradeType)) {
-      skippedUnknownType += 1;
-      continue;
-    }
+      for (const trade of batch) {
+        const tradeType = tradeTypeOf(trade);
 
-    tradesSeen += 1;
-    if (tradeType === 'liquidity_pool') liquidityPoolTrades += 1;
-    else orderbookTrades += 1;
+        // A trade_type we do not model would violate the CHECK constraint and abort the
+        // run. Counting and skipping surfaces the new mechanism without losing the rest
+        // of the range -- and a non-zero count is the signal to add support for it.
+        if (!TRADE_TYPES.has(tradeType)) {
+          counts.skippedUnknownType += 1;
+          continue;
+        }
 
-    const baseAsset = normaliseSide(
-      trade.base_asset_type,
-      trade.base_asset_code,
-      trade.base_asset_issuer,
-    );
-    const counterAsset = normaliseSide(
-      trade.counter_asset_type,
-      trade.counter_asset_code,
-      trade.counter_asset_issuer,
-    );
+        counts.tradesSeen += 1;
+        if (tradeType === 'liquidity_pool') counts.liquidityPoolTrades += 1;
+        else counts.orderbookTrades += 1;
 
-    // Amounts written exactly as Horizon sent them; the TEXT columns exist so no
-    // float round-trip happens anywhere in the write path.
-    tradesWritten += (
-      await db.run(insertTrade, [
-        trade.id,
-        ledgerSequence,
-        baseAsset.code,
-        baseAsset.issuer,
-        counterAsset.code,
-        counterAsset.issuer,
-        trade.base_amount,
-        trade.counter_amount,
-        trade.ledger_close_time,
-        tradeType,
-      ])
-    ).rowsAffected;
+        const baseAsset = normaliseSide(
+          trade.base_asset_type,
+          trade.base_asset_code,
+          trade.base_asset_issuer,
+        );
+        const counterAsset = normaliseSide(
+          trade.counter_asset_type,
+          trade.counter_asset_code,
+          trade.counter_asset_issuer,
+        );
+
+        // Amounts written exactly as Horizon sent them; the TEXT columns exist so no
+        // float round-trip happens anywhere in the write path.
+        counts.tradesWritten += (
+          await tx.run(insertTrade, [
+            trade.id,
+            ledgerOf(trade.paging_token),
+            baseAsset.code,
+            baseAsset.issuer,
+            counterAsset.code,
+            counterAsset.issuer,
+            trade.base_amount,
+            trade.counter_amount,
+            trade.ledger_close_time,
+            tradeType,
+          ])
+        ).rowsAffected;
+      }
+
+      return counts;
+    });
+
+    // Merged only once the batch commits — see the same note in ./payments.ts.
+    tradesSeen += delta.tradesSeen;
+    tradesWritten += delta.tradesWritten;
+    orderbookTrades += delta.orderbookTrades;
+    liquidityPoolTrades += delta.liquidityPoolTrades;
+    skippedUnknownType += delta.skippedUnknownType;
   }
 
   return {

@@ -1,6 +1,7 @@
 import type { SqlAdapter } from '../db/adapter.ts';
 import type { HorizonClient } from '../horizon/client.ts';
 import { cursorBeforeLedger, ledgerOf } from '../horizon/toid.ts';
+import { batchesWithin, batchSizeOf, type BatchOptions } from './batch.ts';
 import type { LedgerRange } from './payments.ts';
 import { normaliseAsset } from './payments.ts';
 
@@ -26,7 +27,8 @@ export interface TrustlineIngestResult {
 /**
  * Ingest trustline establishment for a ledger range.
  *
- * Idempotent by primary key `(account_id, asset_code, asset_issuer)`.
+ * Idempotent by primary key `(account_id, asset_code, asset_issuer)`. Writes commit in
+ * bounded batches rather than one per row (issue #68); see ./batch.ts.
  *
  * **Re-establishment policy: the earliest `established_at` wins.** A trustline that is
  * removed and later created again produces a second `trustline_created` effect, and
@@ -47,6 +49,7 @@ export async function ingestTrustlines(
   db: SqlAdapter,
   client: HorizonClient,
   range: LedgerRange,
+  options?: BatchOptions,
 ): Promise<TrustlineIngestResult> {
   if (range.toLedger < range.fromLedger) {
     throw new RangeError(
@@ -58,35 +61,67 @@ export async function ingestTrustlines(
   const insertTrustline = `INSERT INTO trustlines (account_id, asset_code, asset_issuer, established_at)
      VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`;
 
+  const batchSize = batchSizeOf(options);
+
   let effectsScanned = 0;
   let trustlinesSeen = 0;
   let accountsWritten = 0;
   let trustlinesWritten = 0;
 
-  for await (const effect of client.effects({
+  const effects = client.effects({
     cursor: cursorBeforeLedger(range.fromLedger),
     order: 'asc',
     limit: 200,
-  })) {
-    if (ledgerOf(effect.paging_token) > range.toLedger) break;
+  });
 
-    effectsScanned += 1;
-    if (effect.type !== TRUSTLINE_CREATED) continue;
+  for await (const batch of batchesWithin(
+    effects,
+    (effect) => ledgerOf(effect.paging_token) <= range.toLedger,
+    batchSize,
+  )) {
+    // Each trustline and the `accounts` parent it references are written in the same
+    // transaction, so no batch boundary ever falls between them.
+    const delta = await db.transaction(async (tx) => {
+      const counts = {
+        effectsScanned: 0,
+        trustlinesSeen: 0,
+        accountsWritten: 0,
+        trustlinesWritten: 0,
+      };
 
-    const asset = normaliseAsset(effect);
+      for (const effect of batch) {
+        counts.effectsScanned += 1;
+        if (effect.type !== TRUSTLINE_CREATED) continue;
 
-    // A trustline to native is not a thing on Stellar -- every account holds XLM
-    // without one. An effect claiming otherwise is malformed, and writing it would put
-    // a row in trustlines that no real trustline corresponds to.
-    if (asset.code === 'native') continue;
+        const asset = normaliseAsset(effect);
 
-    trustlinesSeen += 1;
+        // A trustline to native is not a thing on Stellar -- every account holds XLM
+        // without one. An effect claiming otherwise is malformed, and writing it would put
+        // a row in trustlines that no real trustline corresponds to.
+        if (asset.code === 'native') continue;
 
-    // Parent before child, so the foreign key holds.
-    accountsWritten += (await db.run(insertAccount, [effect.account])).rowsAffected;
-    trustlinesWritten += (
-      await db.run(insertTrustline, [effect.account, asset.code, asset.issuer, effect.created_at])
-    ).rowsAffected;
+        counts.trustlinesSeen += 1;
+
+        // Parent before child, so the foreign key holds.
+        counts.accountsWritten += (await tx.run(insertAccount, [effect.account])).rowsAffected;
+        counts.trustlinesWritten += (
+          await tx.run(insertTrustline, [
+            effect.account,
+            asset.code,
+            asset.issuer,
+            effect.created_at,
+          ])
+        ).rowsAffected;
+      }
+
+      return counts;
+    });
+
+    // Merged only once the batch commits — see the same note in ./payments.ts.
+    effectsScanned += delta.effectsScanned;
+    trustlinesSeen += delta.trustlinesSeen;
+    accountsWritten += delta.accountsWritten;
+    trustlinesWritten += delta.trustlinesWritten;
   }
 
   return { effectsScanned, trustlinesSeen, accountsWritten, trustlinesWritten };

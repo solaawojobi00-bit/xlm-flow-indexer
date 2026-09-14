@@ -2,6 +2,7 @@ import type { SqlAdapter } from '../db/adapter.ts';
 import type { HorizonClient } from '../horizon/client.ts';
 import { cursorBeforeLedger, ledgerOf } from '../horizon/toid.ts';
 import type { HorizonLedger, HorizonOperation } from '../horizon/types.ts';
+import { batchesWithin, batchSizeOf, type BatchOptions } from './batch.ts';
 
 /**
  * Operation types that move value between two accounts and therefore belong in
@@ -97,21 +98,34 @@ async function ingestLedgers(
   db: SqlAdapter,
   client: HorizonClient,
   range: LedgerRange,
+  batchSize: number,
 ): Promise<number> {
   let written = 0;
 
-  for await (const ledger of client.ledgers({
+  const ledgers = client.ledgers({
     cursor: cursorBeforeLedger(range.fromLedger),
     order: 'asc',
     limit: 200,
-  })) {
-    if (ledger.sequence > range.toLedger) break;
-    const info = await db.run(INSERT_LEDGER, [
-      ledger.sequence,
-      ledger.closed_at,
-      ledger.operation_count,
-    ]);
-    written += info.rowsAffected;
+  });
+
+  for await (const batch of batchesWithin(
+    ledgers,
+    (ledger) => ledger.sequence <= range.toLedger,
+    batchSize,
+  )) {
+    // The running total is advanced only once the batch commits, so a rolled
+    // back batch cannot be counted as written. The error propagates and the
+    // result is never returned, but keeping the counters honest inside the
+    // function is cheaper than reasoning about that every time it is read.
+    written += await db.transaction(async (tx) => {
+      let inBatch = 0;
+      for (const ledger of batch) {
+        inBatch += (
+          await tx.run(INSERT_LEDGER, [ledger.sequence, ledger.closed_at, ledger.operation_count])
+        ).rowsAffected;
+      }
+      return inBatch;
+    });
   }
 
   return written;
@@ -121,12 +135,14 @@ async function ingestLedgers(
  * Ingest payment-type operations for a ledger range into `payments` + `operations`.
  *
  * Idempotent by primary key: running it twice over the same range writes nothing the
- * second time.
+ * second time. Writes commit in bounded batches rather than one per row (issue #68);
+ * see ./batch.ts for what that does and does not change about a mid-pass failure.
  */
 export async function ingestPayments(
   db: SqlAdapter,
   client: HorizonClient,
   range: LedgerRange,
+  options?: BatchOptions,
 ): Promise<IngestResult> {
   if (range.toLedger < range.fromLedger) {
     throw new RangeError(
@@ -134,7 +150,8 @@ export async function ingestPayments(
     );
   }
 
-  const ledgersWritten = await ingestLedgers(db, client, range);
+  const batchSize = batchSizeOf(options);
+  const ledgersWritten = await ingestLedgers(db, client, range, batchSize);
 
   let operationsScanned = 0;
   let paymentsSeen = 0;
@@ -142,51 +159,80 @@ export async function ingestPayments(
   let operationsWritten = 0;
   let paymentsWritten = 0;
 
-  for await (const op of client.operations({
+  const operations = client.operations({
     cursor: cursorBeforeLedger(range.fromLedger),
     order: 'asc',
     limit: 200,
-  })) {
-    const ledgerSequence = ledgerOf(op.paging_token);
+  });
 
-    // Horizon has no ledger-range filter, so the range ends where the records do.
-    if (ledgerSequence > range.toLedger) break;
+  // Horizon has no ledger-range filter, so the range ends where the records do.
+  for await (const batch of batchesWithin(
+    operations,
+    (op) => ledgerOf(op.paging_token) <= range.toLedger,
+    batchSize,
+  )) {
+    // Every row a batch writes is inside the batch's own transaction, including the
+    // `accounts` parents — so a committed operation can never outlive the account it
+    // references. The `ledgers` parents are safe across batches for a different
+    // reason: the pass above finished, and committed, before this loop started.
+    const delta = await db.transaction(async (tx) => {
+      const counts = {
+        operationsScanned: 0,
+        paymentsSeen: 0,
+        accountsWritten: 0,
+        operationsWritten: 0,
+        paymentsWritten: 0,
+      };
 
-    operationsScanned += 1;
-    if (!PAYMENT_TYPES.has(op.type)) continue;
+      for (const op of batch) {
+        counts.operationsScanned += 1;
+        if (!PAYMENT_TYPES.has(op.type)) continue;
 
-    const amount = destinationAmount(op);
-    const from = op.from;
-    const to = op.to;
+        const amount = destinationAmount(op);
+        const from = op.from;
+        const to = op.to;
 
-    // A payment-type operation missing any of these is malformed rather than merely
-    // unusual. Skipping is safer than writing a half row that a view would later
-    // aggregate as if it were real.
-    if (amount === undefined || from === undefined || to === undefined) continue;
+        // A payment-type operation missing any of these is malformed rather than merely
+        // unusual. Skipping is safer than writing a half row that a view would later
+        // aggregate as if it were real.
+        if (amount === undefined || from === undefined || to === undefined) continue;
 
-    paymentsSeen += 1;
-    const asset = normaliseAsset(op);
+        counts.paymentsSeen += 1;
+        const asset = normaliseAsset(op);
 
-    // Parents before children, so the foreign keys hold.
-    for (const account of new Set([op.source_account, from, to])) {
-      accountsWritten += (await db.run(INSERT_ACCOUNT, [account])).rowsAffected;
-    }
+        // Parents before children, so the foreign keys hold.
+        for (const account of new Set([op.source_account, from, to])) {
+          counts.accountsWritten += (await tx.run(INSERT_ACCOUNT, [account])).rowsAffected;
+        }
 
-    operationsWritten += (
-      await db.run(INSERT_OPERATION, [
-        op.id,
-        ledgerSequence,
-        op.type,
-        op.source_account,
-        op.created_at,
-      ])
-    ).rowsAffected;
+        counts.operationsWritten += (
+          await tx.run(INSERT_OPERATION, [
+            op.id,
+            ledgerOf(op.paging_token),
+            op.type,
+            op.source_account,
+            op.created_at,
+          ])
+        ).rowsAffected;
 
-    // amount is written exactly as Horizon sent it. Any numeric round-trip here would
-    // reintroduce the float precision loss the TEXT column exists to avoid.
-    paymentsWritten += (
-      await db.run(INSERT_PAYMENT, [op.id, from, to, asset.code, asset.issuer, amount])
-    ).rowsAffected;
+        // amount is written exactly as Horizon sent it. Any numeric round-trip here would
+        // reintroduce the float precision loss the TEXT column exists to avoid.
+        counts.paymentsWritten += (
+          await tx.run(INSERT_PAYMENT, [op.id, from, to, asset.code, asset.issuer, amount])
+        ).rowsAffected;
+      }
+
+      return counts;
+    });
+
+    // Merged only once the batch commits, so a rolled back batch contributes nothing —
+    // including to the scanned/seen counters, which would otherwise report reads whose
+    // writes were discarded.
+    operationsScanned += delta.operationsScanned;
+    paymentsSeen += delta.paymentsSeen;
+    accountsWritten += delta.accountsWritten;
+    operationsWritten += delta.operationsWritten;
+    paymentsWritten += delta.paymentsWritten;
   }
 
   return {
