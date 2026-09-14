@@ -1,0 +1,10 @@
+node_modules/
+.next/
+next-env.d.ts
+.vercel
+*.tsbuildinfo
+
+# Local connection strings. The deployed app reads DATABASE_URL from Vercel
+# project settings; nothing with a credential in it belongs in the repo.
+.env
+.env*.local

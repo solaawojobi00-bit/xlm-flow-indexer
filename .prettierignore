@@ -16,3 +16,9 @@ package-lock.json
 # rewritten only by scripts/capture-fixtures.ts; reformatting them would edit data
 # whose whole value is being untouched.
 test/fixtures/
+
+# The dashboard (#78) is a separate npm package with its own toolchain, and most of
+# what lives under it is Next's generated build output. Root Prettier walking it
+# means checking machine-written bundles in `.next/`, so the whole subtree is left
+# to that package.
+web/

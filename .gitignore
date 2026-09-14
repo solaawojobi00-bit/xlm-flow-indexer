@@ -6,7 +6,10 @@ CLAUDE.md
 node_modules/
 dist/
 build/
-coverage/
+# Anchored to the repo root on purpose. Unanchored, this matches *any* directory
+# named `coverage` at any depth — which silently excluded the dashboard's
+# `web/app/api/coverage/` route from the repository (#78).
+/coverage/
 *.log
 npm-debug.log*
 yarn-error.log*

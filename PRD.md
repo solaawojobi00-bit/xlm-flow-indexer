@@ -40,6 +40,13 @@ questions.
   workloads; it does not attempt operational parity (submitting
   transactions, building unsigned txs, etc.).
 
+> **Amendment (#78):** A minimal read-only status page now ships in `web/` — one
+> page of coverage stat cards and an asset-activity table, served by three
+> one-query API routes. It is a deployment demonstration of the indexer's own
+> output, not a step toward the block explorer the first bullet rules out: no
+> search, no account pages, no transaction drill-down, and no write path. The
+> first bullet otherwise stands, and this is its one documented exception.
+
 ## Target Users
 
 - Stellar/Soroban developers who need historical analytics without running

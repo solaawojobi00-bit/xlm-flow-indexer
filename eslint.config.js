@@ -4,7 +4,11 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**'],
+    // `web/**` is the dashboard package (#78). It is a separate npm package with
+    // its own tsconfig and React/JSX toolchain, so the type-aware rules below —
+    // which resolve against the root tsconfig — cannot see its files and report
+    // every one of them as outside the project.
+    ignores: ['dist/**', 'node_modules/**', 'coverage/**', 'web/**'],
   },
   js.configs.recommended,
 

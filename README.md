@@ -351,6 +351,80 @@ npm run format:check
 
 ---
 
+## Web Dashboard (`web/`)
+
+A single read-only status page over a Postgres-backed indexer database: coverage
+stat cards and a table of the most active assets. It is a deliberately minimal
+slice ([#78](https://github.com/solaawojobi00-bit/xlm-flow-indexer/issues/78)) —
+three one-query API routes and one page, no caching layer and no query
+abstraction.
+
+It is a **separate npm package** under [`web/`](web/), with its own
+`package.json` and lockfile. The root package — the CLI, ingestion jobs,
+adapters and migrations — is untouched by it and has no dependency on it.
+
+### Read surface
+
+| Route | Reads | Returns |
+| --- | --- | --- |
+| `GET /api/coverage` | `ledgers` | Ledger count, min/max sequence, latest close time |
+| `GET /api/totals` | `payments`, `trades`, `accounts` | Row counts |
+| `GET /api/assets` | `asset_velocity` | Top 20 assets by volume, summed across days |
+
+`/api/assets` sums `transfer_count` and `total_volume` across the view's daily
+grain. It deliberately does **not** sum `distinct_senders` / `distinct_receivers`:
+those are per-day distinct counts, so adding them across days would count a
+recurring account once per day and produce a number that is not a distinct count
+of anything. It reports `activeDays` instead, which the daily grain does support.
+
+### Running locally
+
+The dashboard needs a Postgres database that has been migrated and ingested
+using the CLI above.
+
+```bash
+cd web
+npm install
+
+# Point it at your database. This file is gitignored.
+echo 'DATABASE_URL=postgres://user:pass@host:5432/dbname' > .env.local
+
+npm run dev
+```
+
+### Deploying to Vercel
+
+1. Import the repository as a Vercel project.
+2. Set **Root Directory** to `web`. Vercel then detects Next.js on its own.
+3. Add the `DATABASE_URL` environment variable in
+   **Project Settings → Environment Variables**:
+
+   | Name | Value | Environments |
+   | --- | --- | --- |
+   | `DATABASE_URL` | Your Postgres connection string, e.g. a Neon pooled URL including `?sslmode=require` | Production, Preview, Development |
+
+`DATABASE_URL` is read only from the environment — it is never committed. No
+connection string belongs in the repository, in `vercel.json`, or in any file
+under `web/` other than the gitignored `.env.local`.
+
+For a serverless deployment, prefer your provider's **pooled** connection
+string. Each instance opens a pool of `max: 1`, but instances scale out
+horizontally, so direct connections exhaust the database's connection limit
+under load where a pooler does not.
+
+[`web/vercel.json`](web/vercel.json) pins the deployment region to `cle1`
+(Cleveland), which is the Vercel region co-located with AWS `us-east-2`. Change
+it to match wherever your database actually lives — a cross-region round trip
+per query is by far the largest cost on this page.
+
+One note on SSL: `node-postgres` currently treats `sslmode=require` as
+`verify-full`, which is *stricter* than libpq's meaning of the same flag. A
+future `pg` v9 will adopt libpq semantics and quietly weaken it. If you want
+certificate verification pinned regardless of driver version, write
+`sslmode=verify-full` explicitly in the connection string.
+
+---
+
 ## Documentation Links
 
 - [PRD.md](PRD.md) — Problem statement, goals, non-goals, and success metrics.
