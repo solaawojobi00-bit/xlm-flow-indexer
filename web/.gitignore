@@ -1,0 +1,12 @@
+node_modules/
+.next/
+next-env.d.ts
+.vercel
+*.tsbuildinfo
+
+# Local connection strings, and the OIDC token `vercel link` writes into
+# .env.local. The deployed app reads DATABASE_URL from Vercel project settings;
+# nothing with a credential in it belongs in the repo. The glob is deliberately
+# broad — it covers .env, .env.local, .env.production and anything else the
+# Vercel CLI decides to write here.
+.env*
