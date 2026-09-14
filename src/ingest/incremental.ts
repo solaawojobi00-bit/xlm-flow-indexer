@@ -1,5 +1,6 @@
 import type { SqlAdapter } from '../db/adapter.ts';
 import type { HorizonClient } from '../horizon/client.ts';
+import type { BatchOptions } from './batch.ts';
 import type { LedgerRange } from './payments.ts';
 import { ingestPayments } from './payments.ts';
 import { ingestTrades } from './trades.ts';
@@ -39,7 +40,13 @@ export const DEFAULT_CONFIRMATION_LAG = 5;
  */
 export const DEFAULT_MAX_LEDGERS_PER_PASS = 200;
 
-export interface IncrementalOptions {
+/**
+ * `BatchOptions` is extended rather than accepted separately because the two knobs
+ * are siblings: `maxLedgersPerPass` bounds how much a tick reads, `batchSize` bounds
+ * how much of it commits at once. A caller tuning one usually wants the other in
+ * view.
+ */
+export interface IncrementalOptions extends BatchOptions {
   /** Where to begin when a job has no recorded watermark. */
   readonly startLedger?: number | undefined;
   readonly confirmationLag?: number | undefined;
@@ -110,13 +117,14 @@ async function runJob(
   client: HorizonClient,
   job: IngestJob,
   range: LedgerRange,
+  options: BatchOptions,
 ): Promise<void> {
   if (job === 'payments') {
-    await ingestPayments(db, client, range);
+    await ingestPayments(db, client, range, options);
   } else if (job === 'trustlines') {
-    await ingestTrustlines(db, client, range);
+    await ingestTrustlines(db, client, range, options);
   } else {
-    await ingestTrades(db, client, range);
+    await ingestTrades(db, client, range, options);
   }
 }
 
@@ -127,6 +135,12 @@ async function runJob(
  * that throws part-way therefore leaves the watermark where it was, and the next
  * pass re-reads the whole range — which is safe rather than merely tolerable,
  * because every insert is ON CONFLICT DO NOTHING (issue #6).
+ *
+ * Batching (issue #68) does not weaken that. It changes how much of a failed pass
+ * survives — whole committed batches rather than individual rows — but not whether
+ * re-reading the range is safe, because the watermark is outside every batch's
+ * transaction either way. The watermark write is its own statement for the same
+ * reason: a pass that ingested nothing new still has nothing to roll back.
  */
 export async function ingestIncrementalPass(
   db: SqlAdapter,
@@ -142,7 +156,7 @@ export async function ingestIncrementalPass(
     return { job, range: undefined, latestLedger, lastLedger };
   }
 
-  await runJob(db, client, job, range);
+  await runJob(db, client, job, range, options);
   await recordIngestedLedger(db, job, range.toLedger);
 
   return { job, range, latestLedger, lastLedger: await lastIngestedLedger(db, job) };

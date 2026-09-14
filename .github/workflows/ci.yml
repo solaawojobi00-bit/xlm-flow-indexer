@@ -195,3 +195,12 @@ jobs:
       # A new suite that needs a server has to be added to this list.
       - name: Postgres schema and constraint suite
         run: node --test test/postgres.test.ts test/db/pg-adapter.test.ts test/cli-postgres.test.ts
+
+      # Issue #68's fourth acceptance criterion. The saving batching exists for is a
+      # commit count against a real server, and this job holds the only one — against
+      # in-memory SQLite a commit is nearly free, so the test suite cannot show it.
+      # Reported rather than asserted: it is a measurement for a reader of the log,
+      # and turning a timing into a pass/fail threshold would make the job flaky on
+      # whatever runner it happens to land on.
+      - name: Write-batching benchmark
+        run: node scripts/bench-batching.ts --postgres "$DATABASE_URL"
