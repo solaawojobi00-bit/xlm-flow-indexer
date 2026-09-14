@@ -1,190 +1,586 @@
 /*
- * Minimal, legible styling for the status page (#78). Deliberately not a design
- * system: a few tokens, one grid, one table.
+ * "Ledger Rail" — the readout for a running Stellar indexer (#78).
+ *
+ * Colour carries meaning here rather than decoration:
+ *   --signal  cyan-teal   what the index actually holds
+ *   --bound   amber       the two endpoints of the indexed window, nothing else
+ *   --dim     slate       the chain beyond the window, and secondary text
+ *
+ * No border-radius and no shadows anywhere. Panels are separated by hairline
+ * rules, the way a segmented instrument face is, not by floating cards.
  */
 
 :root {
-  --bg: #fbfbfa;
-  --surface: #ffffff;
-  --border: #e4e4e1;
-  --text: #1c1c1a;
-  --muted: #6b6b66;
-  --accent: #2f5fd0;
-  --radius: 10px;
-  color-scheme: light;
+  --ink: #0b1018;
+  --panel: #101825;
+  --rule: #1d2838;
+  --rule-bright: #2b3a4e;
+  --dim: #5f7085;
+  --text: #b9c8d8;
+  --bright: #eef4fa;
+  --signal: #4fd1c5;
+  --bound: #f0a63c;
+
+  --gutter: clamp(20px, 5vw, 56px);
+  --measure: 1060px;
+
+  color-scheme: dark;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #121211;
-    --surface: #1b1b1a;
-    --border: #2e2e2c;
-    --text: #ececea;
-    --muted: #9a9a94;
-    --accent: #7fa2f0;
-    color-scheme: dark;
-  }
-}
-
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
-  padding: 0;
-  background: var(--bg);
+  background: var(--ink);
   color: var(--text);
-  font-family:
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    Roboto,
-    sans-serif;
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
   font-size: 15px;
-  line-height: 1.55;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-.wrap {
-  max-width: 900px;
+/* A single faint vertical seam down the page, echoing the rail. Purely
+   structural — it marks the measure, and disappears on narrow screens. */
+body::before {
+  content: '';
+  position: fixed;
+  inset-block: 0;
+  left: 50%;
+  width: min(var(--measure), 100% - var(--gutter) * 2);
+  transform: translateX(-50%);
+  border-inline: 1px solid var(--rule);
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 0;
+}
+
+@media (max-width: 720px) {
+  body::before {
+    display: none;
+  }
+}
+
+.shell {
+  position: relative;
+  z-index: 1;
+  max-width: var(--measure);
   margin: 0 auto;
-  padding-block: 48px 64px;
-  padding-inline: 20px;
+  padding-inline: var(--gutter);
 }
 
-header h1 {
+/* ── Masthead ───────────────────────────────────────────────────────────── */
+
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px 28px;
+  padding-block: 26px 18px;
+  border-bottom: 1px solid var(--rule-bright);
+}
+
+.wordmark {
   margin: 0;
-  font-size: 1.5rem;
-  font-weight: 620;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--bright);
+}
+
+.wordmark .slash {
+  color: var(--signal);
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.tab {
+  appearance: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  padding: 6px 14px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.82rem;
+  color: var(--dim);
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab[aria-selected='true'] {
+  color: var(--bright);
+  border-bottom-color: var(--signal);
+}
+
+.tab:focus-visible,
+.sort:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 3px;
+}
+
+/* ── Section furniture ──────────────────────────────────────────────────── */
+
+.panel {
+  padding-block: clamp(36px, 6vw, 60px) 0;
+}
+
+.kicker {
+  margin: 0 0 10px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.76rem;
+  color: var(--dim);
+}
+
+.lede {
+  margin: 0 0 clamp(30px, 5vw, 46px);
+  max-width: 54ch;
+  font-size: clamp(1.45rem, 3.4vw, 2.05rem);
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -0.022em;
+  color: var(--bright);
+  text-wrap: balance;
+}
+
+.section-title {
+  margin: 0 0 6px;
+  font-size: 1.15rem;
+  font-weight: 600;
   letter-spacing: -0.015em;
+  color: var(--bright);
 }
 
-header p {
-  margin: 6px 0 0;
-  color: var(--muted);
-  font-size: 0.9rem;
+/* ── The rail: the indexed window as a lit segment ──────────────────────── */
+
+.rail {
+  padding-block: 8px 0;
 }
 
-h2 {
-  margin: 40px 0 14px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--muted);
-}
-
-/* Stat cards ------------------------------------------------------------- */
-
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+.rail-figures {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
   gap: 12px;
-  margin-top: 28px;
+  font-family: var(--font-mono), ui-monospace, monospace;
 }
 
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 18px;
-}
-
-.card .label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-}
-
-.card .value {
-  margin-top: 6px;
-  font-size: 1.5rem;
-  font-weight: 620;
+.rail-bound {
+  font-size: clamp(1.05rem, 3.2vw, 1.6rem);
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
+  color: var(--bright);
   letter-spacing: -0.02em;
-  word-break: break-word;
 }
 
-.card .value.small {
-  font-size: 1.05rem;
+.rail-span {
+  padding-bottom: 3px;
+  font-size: 0.8rem;
+  color: var(--signal);
+  white-space: nowrap;
 }
 
-/* Table ------------------------------------------------------------------ */
+/* The track: dashed beyond the window, solid within it. The dashes need enough
+   run to read as "the chain continues", not as a rendering artefact. */
+.rail-track {
+  display: grid;
+  grid-template-columns: clamp(48px, 9vw, 96px) 1fr clamp(48px, 9vw, 96px);
+  align-items: center;
+  margin-top: 14px;
+}
+
+.rail-beyond {
+  height: 1px;
+  background-image: linear-gradient(to right, var(--rule-bright) 55%, transparent 55%);
+  background-size: 6px 1px;
+  background-repeat: repeat-x;
+}
+
+/* Amber marks only ever means "edge of what is indexed", so the ticks are the
+   most assertive marks on the rail. */
+.rail-window {
+  position: relative;
+  height: 26px;
+  border-inline: 3px solid var(--bound);
+}
+
+.rail-window::before {
+  /* Unlit bed: the segment's full extent, always visible. */
+  content: '';
+  position: absolute;
+  inset-block: 50%;
+  inset-inline: 0;
+  height: 3px;
+  transform: translateY(-50%);
+  background: var(--rule-bright);
+}
+
+.rail-fill {
+  position: absolute;
+  inset-block: 50%;
+  inset-inline: 0;
+  height: 3px;
+  transform: translateY(-50%) scaleX(0);
+  transform-origin: left center;
+  background: var(--signal);
+  box-shadow: 0 0 14px rgba(79, 209, 197, 0.5);
+}
+
+/* The one orchestrated moment: ingestion sweeping across the range, once. */
+.rail-fill.is-charged {
+  animation: charge 900ms cubic-bezier(0.22, 0.75, 0.24, 1) forwards;
+}
+
+@keyframes charge {
+  to {
+    transform: translateY(-50%) scaleX(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .rail-fill.is-charged {
+    animation: none;
+    transform: translateY(-50%) scaleX(1);
+  }
+}
+
+.rail-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 9px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: var(--dim);
+}
+
+/* ── Readouts ───────────────────────────────────────────────────────────── */
+
+.readouts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: clamp(32px, 5vw, 48px);
+  border-top: 1px solid var(--rule-bright);
+  border-bottom: 1px solid var(--rule-bright);
+}
+
+.readout {
+  padding: 20px 22px;
+  border-left: 1px solid var(--rule);
+}
+
+.readout:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.readout-value {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: clamp(1.7rem, 4.6vw, 2.3rem);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  color: var(--bright);
+  line-height: 1.1;
+}
+
+.readout-value.is-waiting {
+  color: var(--rule-bright);
+}
+
+.readout-label {
+  margin-top: 5px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.76rem;
+  color: var(--dim);
+}
+
+@media (max-width: 620px) {
+  .readouts {
+    grid-template-columns: 1fr;
+  }
+  .readout {
+    padding-inline: 0;
+    border-left: 0;
+    border-top: 1px solid var(--rule);
+  }
+  .readout:first-child {
+    border-top: 0;
+  }
+}
+
+/* ── Provenance ─────────────────────────────────────────────────────────── */
+
+/* Prose is set in the display face, not mono. A reader unfamiliar with the
+   project has to take this in at a glance, and a paragraph of monospace is
+   slower to read — mono is kept for the instrument line and the figures inside
+   the sentence, where fixed width is doing real work. */
+.provenance {
+  margin-top: 26px;
+  max-width: 64ch;
+  font-size: 0.92rem;
+  line-height: 1.65;
+  color: var(--dim);
+}
+
+.provenance p {
+  margin: 0;
+}
+
+.provenance p + p {
+  margin-top: 8px;
+}
+
+.provenance .hi {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.85em;
+  color: var(--text);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 10px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  background: var(--signal);
+  box-shadow: 0 0 9px rgba(79, 209, 197, 0.85);
+}
+
+.status-dot.is-down {
+  background: #e2604f;
+  box-shadow: none;
+}
+
+.status-dot.is-waiting {
+  background: var(--rule-bright);
+  box-shadow: none;
+}
+
+a {
+  color: var(--signal);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+/* ── Assets table ───────────────────────────────────────────────────────── */
 
 .table-scroll {
+  margin-top: 22px;
   overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
+  border-top: 1px solid var(--rule-bright);
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.88rem;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.83rem;
 }
 
-th,
-td {
-  padding: 10px 14px;
+thead th {
+  padding: 0;
+  border-bottom: 1px solid var(--rule-bright);
+  font-weight: 400;
   text-align: left;
-  border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 
-th {
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
+.sort,
+.th-static {
+  display: block;
+  width: 100%;
+  padding: 11px 16px 11px 0;
+  font: inherit;
+  color: var(--dim);
+  text-align: left;
+  background: none;
+  border: 0;
 }
 
-tbody tr:last-child td {
-  border-bottom: none;
+.sort {
+  cursor: pointer;
+  transition: color 140ms ease;
 }
 
-td.num,
-th.num {
+.sort:hover {
+  color: var(--text);
+}
+
+.sort[data-active='true'] {
+  color: var(--signal);
+}
+
+.sort-caret {
+  margin-left: 6px;
+  opacity: 0.85;
+}
+
+th.num .sort,
+th.num .th-static {
   text-align: right;
+  padding-right: 0;
+  padding-left: 16px;
+}
+
+tbody td {
+  padding: 11px 16px 11px 0;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+
+tbody tr:hover td {
+  background: var(--panel);
+}
+
+td.num {
+  text-align: right;
+  padding-right: 0;
+  padding-left: 16px;
   font-variant-numeric: tabular-nums;
 }
 
-code.issuer {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.82em;
-  color: var(--muted);
+.asset-code {
+  color: var(--bright);
+  font-weight: 500;
 }
 
-/* States ----------------------------------------------------------------- */
+.issuer {
+  color: var(--dim);
+}
 
-.note {
-  color: var(--muted);
+.native-tag {
+  color: var(--signal);
+}
+
+/* Reads 1 for every row in a sub-day window — dimmed so it does not read as a
+   meaningful varying measure when it cannot be one. */
+td.is-flat {
+  color: var(--dim);
+}
+
+.table-notes {
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 9px;
+  max-width: 72ch;
+  font-size: 0.8rem;
+  color: var(--dim);
+}
+
+.table-notes dt {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  color: var(--text);
+}
+
+.table-notes dd {
+  margin: 2px 0 0;
+}
+
+/* ── Prose (About) ──────────────────────────────────────────────────────── */
+
+.prose {
+  max-width: 62ch;
+}
+
+.prose p {
+  margin: 0 0 15px;
+}
+
+.prose dl {
+  margin: 22px 0 0;
+  border-top: 1px solid var(--rule);
+}
+
+.prose dt {
+  padding-top: 14px;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.78rem;
+  color: var(--signal);
+}
+
+.prose dd {
+  margin: 4px 0 14px;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 14px;
+}
+
+/* ── States ─────────────────────────────────────────────────────────────── */
+
+.notice {
+  margin-top: 22px;
+  padding: 16px 18px;
+  border: 1px solid var(--rule-bright);
+  border-left: 2px solid var(--bound);
+  background: var(--panel);
+  max-width: 62ch;
+}
+
+.notice p {
+  margin: 0;
   font-size: 0.88rem;
-  padding: 18px 0;
 }
 
-.error {
-  border: 1px solid var(--border);
-  border-left: 3px solid #c2453d;
-  border-radius: var(--radius);
-  background: var(--surface);
-  padding: 14px 16px;
-  font-size: 0.88rem;
+.notice p + p {
+  margin-top: 7px;
+  color: var(--dim);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.78rem;
 }
 
-footer {
-  margin-top: 44px;
-  padding-top: 18px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 0.82rem;
+.notice strong {
+  color: var(--bright);
+  font-weight: 600;
 }
 
-footer a {
-  color: var(--accent);
+.empty {
+  padding: 34px 0;
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+
+/* ── Foot ───────────────────────────────────────────────────────────────── */
+
+.foot {
+  margin-top: clamp(40px, 5vw, 58px);
+  padding-block: 18px 40px;
+  border-top: 1px solid var(--rule-bright);
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: var(--dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  justify-content: space-between;
 }

@@ -359,6 +359,11 @@ slice ([#78](https://github.com/solaawojobi00-bit/xlm-flow-indexer/issues/78)) �
 three one-query API routes and one page, no caching layer and no query
 abstraction.
 
+**Live:** <https://xlm-flow-indexer.vercel.app>
+
+The deployed instance is backed by a bounded testnet window rather than full
+ledger history — see [Backfill window](#backfill-window) below.
+
 It is a **separate npm package** under [`web/`](web/), with its own
 `package.json` and lockfile. The root package — the CLI, ingestion jobs,
 adapters and migrations — is untouched by it and has no dependency on it.
@@ -376,6 +381,32 @@ grain. It deliberately does **not** sum `distinct_senders` / `distinct_receivers
 those are per-day distinct counts, so adding them across days would count a
 recurring account once per day and produce a number that is not a distinct count
 of anything. It reports `activeDays` instead, which the daily grain does support.
+
+### Backfill window
+
+The deployed instance holds testnet ledgers **4,679,079 – 4,679,278** — 200
+ledgers, roughly 17 minutes of network activity on 2026-09-14. This is a
+deliberate bound, not a full backfill.
+
+Measured ingestion throughput against Horizon testnet is about **50 ledgers per
+minute**, so a full history of ~4.68M ledgers would take on the order of two
+months of continuous ingestion. The window was sized to prove the pipeline
+end to end, not to be complete.
+
+One visible consequence: the **Active days** column reads `1` for every asset,
+because a 17-minute window falls inside a single UTC day. `asset_velocity` has a
+daily grain, so that column only becomes interesting once the ingested range
+spans more than one day — roughly 17,280 ledgers per day, or about six hours of
+ingestion per day of history.
+
+To widen it, run the CLI against the same database:
+
+```bash
+node src/cli.ts ingest --from <lower> --to 4679078 --postgres "$DATABASE_URL" --anchors config/anchors.json
+```
+
+Ingestion is idempotent by primary key, so overlapping an already-ingested range
+is a no-op rather than a duplicate-row bug.
 
 ### Running locally
 
