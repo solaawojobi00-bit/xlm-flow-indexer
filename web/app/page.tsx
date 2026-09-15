@@ -108,6 +108,18 @@ export default function Page() {
     return rows;
   }, [assets, sort]);
 
+  /**
+   * Whether `activeDays` is stuck at 1 for every row.
+   *
+   * It is, for as long as the indexed window sits inside a single UTC day — the
+   * view has a daily grain, so the column cannot vary until the range crosses a
+   * midnight. Deriving that from the rows rather than asserting a window
+   * duration in prose is what keeps the note below true at any window size: an
+   * earlier version hardcoded "about 17 minutes" and was left stating a
+   * falsehood the moment the backfill grew.
+   */
+  const allFlatDays = sorted !== null && sorted.length > 0 && sorted.every((a) => a.activeDays === 1);
+
   // Narrowed once into a concrete object: an empty database reports null bounds,
   // and every consumer below wants both or neither.
   const win =
@@ -309,7 +321,11 @@ export default function Page() {
                         <td className="num" title={exact.format(asset.totalVolume)}>
                           {volume.format(asset.totalVolume)}
                         </td>
-                        <td className="num is-flat">{count.format(asset.activeDays)}</td>
+                        {/* Dimmed only while the column cannot vary, so it stops
+                            reading as a real measure exactly when it isn't one. */}
+                        <td className={`num${allFlatDays ? ' is-flat' : ''}`}>
+                          {count.format(asset.activeDays)}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -328,9 +344,10 @@ export default function Page() {
                 <div>
                   <dt>Active days</dt>
                   <dd>
-                    Distinct UTC days on which the asset moved. Every row reads 1 here, because the
-                    indexed window spans about 17 minutes and so falls inside a single day. It
-                    becomes a useful measure once the backfill covers more than one day.
+                    Distinct UTC days on which the asset moved.{' '}
+                    {allFlatDays
+                      ? 'Every row reads 1 here, because the indexed window falls inside a single UTC day. It becomes a useful measure once the backfill crosses a day boundary.'
+                      : 'The indexed window crosses at least one UTC day boundary, so this counts the days each asset was actually active in.'}
                   </dd>
                 </div>
                 <div>
