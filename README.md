@@ -384,24 +384,35 @@ of anything. It reports `activeDays` instead, which the daily grain does support
 
 ### Backfill window
 
-The deployed instance holds testnet ledgers **4,679,079 – 4,679,278** — 200
-ledgers, roughly 17 minutes of network activity on 2026-09-14. This is a
-deliberate bound, not a full backfill.
+The deployed instance holds testnet ledgers **4,679,079 – 4,679,798** — 720
+ledgers, covering `2026-09-14T20:49:42Z` to `2026-09-14T21:49:37Z`, an hour of
+network activity. This is a deliberate bound, not a full backfill.
+
+The range is contiguous: `720 = max − min + 1`, with no gaps. That matters
+because the dashboard describes it as "a contiguous run of 720 ledgers", so a
+backfill that skipped ahead would make the page assert something untrue.
 
 Measured ingestion throughput against Horizon testnet is about **50 ledgers per
-minute**, so a full history of ~4.68M ledgers would take on the order of two
-months of continuous ingestion. The window was sized to prove the pipeline
-end to end, not to be complete.
+minute** (a testnet ledger closes every 5 seconds, so an hour of history costs
+roughly a quarter-hour to pull). A full history of ~4.68M ledgers would
+therefore take on the order of two months of continuous ingestion. The window
+was sized to prove the pipeline end to end, not to be complete.
 
-One visible consequence: the **Active days** column reads `1` for every asset,
-because a 17-minute window falls inside a single UTC day. `asset_velocity` has a
-daily grain, so that column only becomes interesting once the ingested range
-spans more than one day — roughly 17,280 ledgers per day, or about six hours of
-ingestion per day of history.
+One visible consequence: the **Active days** column reads `1` for every asset.
+`asset_velocity` has a daily grain, so the column cannot vary until the ingested
+range crosses a UTC midnight — which is a property of *where* the window sits,
+not of how large it is. Extending within a single day will not change it, no
+matter how many ledgers are added. At roughly 17,280 ledgers per day, a window
+that spans a day boundary needs to be positioned to straddle one.
 
-To widen it, run the CLI against the same database:
+To widen it, run the CLI against the same database. Extend from either end of
+the existing range to keep it contiguous:
 
 ```bash
+# Forward, from the current upper bound.
+node src/cli.ts ingest --from 4679799 --to <higher> --postgres "$DATABASE_URL" --anchors config/anchors.json
+
+# Backward, from the current lower bound.
 node src/cli.ts ingest --from <lower> --to 4679078 --postgres "$DATABASE_URL" --anchors config/anchors.json
 ```
 
