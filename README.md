@@ -465,6 +465,66 @@ future `pg` v9 will adopt libpq semantics and quietly weaken it. If you want
 certificate verification pinned regardless of driver version, write
 `sslmode=verify-full` explicitly in the connection string.
 
+### Rotating the database credential
+
+`DATABASE_URL` carries a live database credential, so it should be cycled once it
+has been handled anywhere other than a password manager — a credential created to
+stand a deployment up and passed around during setup is one that has been
+([#81](https://github.com/solaawojobi00-bit/xlm-flow-indexer/issues/81)). Nothing
+in this repository has to change to rotate it: the dashboard reads the value from
+the environment and from nowhere else, so a rotation is a new role, an environment
+change, and a redeploy.
+
+Rotate **after** a deployment is confirmed working, not during bring-up. Changing
+the credential underneath a deployment that is still being validated makes the
+next failure ambiguous — it could be the rotation or the thing being validated.
+
+1. **Create a new role** in the database provider's console (in Neon:
+   *Roles → New role*). Create a second role rather than resetting the existing
+   one's password: both credentials are then live at the same time, which is what
+   makes step 5 a revocation rather than an outage. Copy its **pooled** connection
+   string.
+2. **Update `DATABASE_URL`** in **Vercel → Project Settings → Environment
+   Variables**, for *all three* environments — Production, Preview and
+   Development. An environment that is missed keeps a credential that step 5 is
+   about to revoke, and it will not fail until someone opens a preview.
+3. **Redeploy.** Environment variables are read when an instance starts, so a
+   running deployment keeps serving the old value until it is replaced — editing
+   the variable alone changes nothing that is currently running.
+4. **Check the deployment, before revoking anything:**
+
+   ```bash
+   npm run verify:deployment
+   # or, for a deployment other than the default
+   node scripts/verify-deployment.ts --base-url https://<deployment>.vercel.app
+   ```
+
+   This requests `/api/coverage`, `/api/totals` and `/api/assets` and exits
+   non-zero unless all three return 200 with a body matching the contract in
+   [Read surface](#read-surface). It needs no credential of its own — the
+   dashboard is read-only and unauthenticated — so whoever runs it does not need
+   the secret being rotated.
+5. **Revoke the old role** in the provider's console, once step 4 passes.
+6. **Check the deployment again.** This is the step that proves the redeploy took
+   the new value. Until the old credential is gone, a deployment still running on
+   it is indistinguishable from one that rotated correctly — step 4 passes either
+   way, and only revocation separates them.
+
+A failure at step 6 means the instances are still on the old credential: re-run
+the redeploy in step 3 and check again.
+
+Two rotation mistakes survive a plain status check, so `verify-deployment` looks
+past the status code. A role created against the *wrong database* — a separate
+object from the role in Neon's console — connects fine and makes every route
+return 200 over empty tables, so a `ledgerCount` of 0 is treated as a failure
+(pass `--allow-empty` for a deployment that genuinely has no data yet). And a
+response that is 200 but not the documented JSON is a platform error page, not a
+working route.
+
+Finally, rotate the copies outside Vercel: any `web/.env.local` and any shell
+environment used to run the CLI against the same database (see
+[Backfill window](#backfill-window)) still hold the revoked credential.
+
 ---
 
 ## Documentation Links
