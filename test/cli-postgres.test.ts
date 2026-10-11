@@ -188,6 +188,94 @@ describe('ingest --postgres', { skip }, () => {
   });
 });
 
+describe('DATABASE_URL instead of --postgres', { skip }, () => {
+  // Issue #80, against the real server: the credential never appears in argv,
+  // and the run writes the same rows the flag form does.
+  it('ingests into Postgres with no connection string on the command line', async () => {
+    const argv = [
+      'ingest',
+      '--from',
+      String(fixture.fromLedger),
+      '--to',
+      String(fixture.toLedger),
+      '--horizon',
+      server.baseUrl,
+      '--payments',
+    ];
+    assert.ok(
+      !argv.some((arg) => arg.includes('postgres://')),
+      'the point of the fallback is that argv carries no connection string',
+    );
+
+    const code = await runCli(argv, { DATABASE_URL: DATABASE_URL! });
+
+    assert.equal(code, 0);
+    assert.equal(await countOf('payments'), 8);
+    assert.equal(await countOf('ledgers'), 13);
+  });
+
+  it('polls into Postgres with no connection string on the command line', async () => {
+    const code = await runCli(
+      [
+        'poll',
+        '--horizon',
+        server.baseUrl,
+        '--jobs',
+        'payments',
+        '--start-ledger',
+        String(fixture.fromLedger),
+        '--confirmation-lag',
+        '0',
+        '--once',
+      ],
+      { DATABASE_URL: DATABASE_URL! },
+    );
+
+    assert.equal(code, 0);
+    assert.equal(await countOf('payments'), 8);
+    assert.equal(await watermarkOf('payments'), HEAD);
+  });
+
+  it('migrates a dropped schema, so migrate-on-start resolves the engine too', async () => {
+    await db().query(
+      `DROP TABLE IF EXISTS payments, operations, trades, trustlines, accounts, ledgers,
+       ingest_state, anchor_issuers, schema_migrations CASCADE`,
+    );
+    await db().query(
+      `DROP VIEW IF EXISTS account_flow_daily, asset_velocity, anchor_payment_volume,
+       trade_pair_activity, top_accounts_by_volume CASCADE`,
+    );
+
+    const code = await runCli(['migrate'], { DATABASE_URL: DATABASE_URL! });
+
+    assert.equal(code, 0);
+    assert.equal(await countOf('payments'), 0, 'the table exists again, and is empty');
+  });
+
+  it('prefers an explicit --postgres over the environment', async () => {
+    // A dead address in the flag against a working one in the environment: the
+    // flag has to win, or a stray export could redirect a deliberate run.
+    const code = await runCli(
+      [
+        'ingest',
+        '--from',
+        String(fixture.fromLedger),
+        '--to',
+        String(fixture.toLedger),
+        '--postgres',
+        'postgres://user:pw@127.0.0.1:1/nope',
+        '--horizon',
+        server.baseUrl,
+        '--payments',
+      ],
+      { DATABASE_URL: DATABASE_URL! },
+    );
+
+    assert.equal(code, 1);
+    assert.equal(await countOf('payments'), 0, 'nothing may have been written to the env target');
+  });
+});
+
 describe('poll --postgres', { skip }, () => {
   it('runs a single tick and records the watermark', async () => {
     const code = await runCli([

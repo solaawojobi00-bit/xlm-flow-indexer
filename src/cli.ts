@@ -30,6 +30,15 @@ Global Options:
   -h, --help              Show this help message
   -v, --version           Show version number
 
+Environment:
+  DATABASE_URL            Postgres connection string used by migrate, ingest and
+                          poll when neither --db nor --postgres is passed. A
+                          managed-Postgres URL carries a live credential, and an
+                          argument is visible in shell history and in the process
+                          list; the environment is not. An explicit flag always
+                          wins, and passing both --db and --postgres is still an
+                          error whether or not DATABASE_URL is set.
+
 Command: migrate
   Options:
     --db <path>           Path to the SQLite database file (required unless --postgres)
@@ -86,6 +95,7 @@ Examples:
   xlm-flow-indexer poll --db ./indexer.db --start-ledger 4539850 --interval 30
   xlm-flow-indexer poll --db ./indexer.db --once
   xlm-flow-indexer poll --postgres postgres://localhost:5432/xlm --once
+  DATABASE_URL=postgres://... xlm-flow-indexer migrate
 `;
 
 export type IngestJobName = 'payments' | 'trustlines' | 'trades';
@@ -94,6 +104,14 @@ export interface ParsedArgs {
   command?: string | undefined;
   db?: string | undefined;
   postgres?: string | undefined;
+  /**
+   * Whether `postgres` came from DATABASE_URL rather than from `--postgres`.
+   *
+   * Only the banner cares: an operator who set the variable in one shell and
+   * runs the CLI in another should be able to see which target was picked and
+   * where it came from. Everything downstream treats the two identically.
+   */
+  postgresFromEnv: boolean;
   interval?: number | undefined;
   startLedger?: number | undefined;
   maxTicks?: number | undefined;
@@ -224,6 +242,7 @@ export function parseCliArgs(args: readonly string[]): ParsedArgs {
     command,
     db,
     postgres,
+    postgresFromEnv: false,
     interval,
     startLedger,
     maxTicks,
@@ -238,6 +257,42 @@ export function parseCliArgs(args: readonly string[]): ParsedArgs {
     help,
     version,
   };
+}
+
+/** The slice of the process environment the CLI reads. */
+export interface CliEnv {
+  readonly DATABASE_URL?: string | undefined;
+}
+
+/**
+ * Take the Postgres connection string from DATABASE_URL when no engine flag was
+ * passed.
+ *
+ * `--postgres <url>` puts a live credential into shell history and into the
+ * process list, where any other user on the machine can read it (issue #80).
+ * `redactConnectionString` already treats the string as sensitive once it is
+ * inside the process; this is how it gets there without passing through argv.
+ *
+ * Deliberately a fallback and not a precedence rule:
+ *
+ * - An explicit `--db` or `--postgres` wins outright. "Say what you mean" still
+ *   holds, and a shell that happens to export DATABASE_URL cannot redirect a
+ *   command that named its target.
+ * - `--db` plus `--postgres` stays the same error it has been since #48. The
+ *   environment is consulted only when neither was given, so it never turns an
+ *   ambiguous pair into a third candidate.
+ * - An empty or whitespace-only DATABASE_URL counts as unset. A variable
+ *   exported without a value is the shape CI leaves behind, and the honest
+ *   answer there is the missing-argument error rather than a connection attempt
+ *   against "".
+ */
+export function applyEnvFallback(parsed: ParsedArgs, env: CliEnv): ParsedArgs {
+  if (parsed.db !== undefined || parsed.postgres !== undefined) return parsed;
+
+  const fromEnv = env.DATABASE_URL?.trim();
+  if (!fromEnv) return parsed;
+
+  return { ...parsed, postgres: fromEnv, postgresFromEnv: true };
 }
 
 type PgClient = import('pg').Client;
@@ -279,7 +334,12 @@ export function redactConnectionString(connectionString: string): string {
 
 /** What the banner calls the database, without needing a connection first. */
 function targetLabel(parsed: ParsedArgs): string {
-  return parsed.postgres ? redactConnectionString(parsed.postgres) : (parsed.db ?? '');
+  if (!parsed.postgres) return parsed.db ?? '';
+  const redacted = redactConnectionString(parsed.postgres);
+  // Named so a run that took its target from the environment does not look like
+  // one that was pointed there by hand. Still redacted: where the string came
+  // from says nothing about whether it carries a password.
+  return parsed.postgresFromEnv ? `${redacted} (from DATABASE_URL)` : redacted;
 }
 
 /**
@@ -287,13 +347,21 @@ function targetLabel(parsed: ParsedArgs): string {
  *
  * One rule in one place: `migrate` has had it since #48 and `ingest`/`poll`
  * inherit exactly it, rather than growing a near-copy each.
+ *
+ * Runs after `applyEnvFallback`, so "neither flag, but DATABASE_URL is set" has
+ * already become a `postgres` target by the time this sees it and the rule here
+ * is unchanged. The missing-argument message names the variable, because an
+ * operator who gets it either forgot a flag or exported nothing.
  */
 function engineProblem(parsed: ParsedArgs): string | undefined {
   if (parsed.db && parsed.postgres) {
     return 'Error: Pass either --db or --postgres, not both.';
   }
   if (!parsed.db && !parsed.postgres) {
-    return 'Error: Missing required argument: one of --db <path> or --postgres <url>';
+    return (
+      'Error: Missing required argument: one of --db <path> or --postgres <url> ' +
+      '(or set DATABASE_URL)'
+    );
   }
   return undefined;
 }
@@ -483,10 +551,15 @@ async function runPoll(parsed: ParsedArgs): Promise<number> {
   }
 }
 
-export async function runCli(argv: readonly string[]): Promise<number> {
+/**
+ * @param env Where DATABASE_URL is read from. Defaults to the real environment;
+ *   tests pass their own so a suite's result never depends on what the shell
+ *   that started it happened to export.
+ */
+export async function runCli(argv: readonly string[], env: CliEnv = process.env): Promise<number> {
   let parsed: ParsedArgs;
   try {
-    parsed = parseCliArgs(argv);
+    parsed = applyEnvFallback(parseCliArgs(argv), env);
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`);
     return 1;

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { parseCliArgs, redactConnectionString, runCli } from '../src/cli.ts';
+import { applyEnvFallback, parseCliArgs, redactConnectionString, runCli } from '../src/cli.ts';
 import { openDb } from '../src/db/client.ts';
 import { appliedMigrations } from '../src/db/migrate.ts';
 import { loadFixture, startFixtureServer, type FixtureServer } from './helpers/fixture-server.ts';
@@ -25,6 +25,36 @@ after(async () => {
 
 function tempDbPath(): string {
   return join(scratchDir, `test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+}
+
+/**
+ * Run the CLI with both streams captured.
+ *
+ * The banner goes to stdout and the failure to stderr, and the DATABASE_URL
+ * cases below assert on each: that the string was used, and that its password
+ * reached neither.
+ */
+async function captureCli(
+  argv: readonly string[],
+  env: Parameters<typeof runCli>[1],
+): Promise<{ code: number; out: string; err: string }> {
+  let out = '';
+  let err = '';
+  const origLog = console.log;
+  const origError = console.error;
+  console.log = (msg: string) => {
+    out += `${msg}\n`;
+  };
+  console.error = (msg: string) => {
+    err += `${msg}\n`;
+  };
+
+  try {
+    return { code: await runCli(argv, env), out, err };
+  } finally {
+    console.log = origLog;
+    console.error = origError;
+  }
 }
 
 /** Run the CLI with stderr captured, so a message can be asserted on. */
@@ -187,7 +217,10 @@ describe('CLI command execution', () => {
   });
 
   it('fails migrate with non-zero exit code when --db is missing', async () => {
-    const code = await runCli(['migrate']);
+    // An explicit empty environment, so the DATABASE_URL fallback (#80) cannot
+    // turn this into a connection attempt when the suite is run from a shell
+    // that happens to export one.
+    const code = await runCli(['migrate'], {});
     assert.equal(code, 1);
   });
 
@@ -240,7 +273,7 @@ describe('CLI command execution', () => {
       ['ingest', ['--from', '1', '--to', '2']],
       ['poll', ['--once']],
     ] as const) {
-      const errors = await captureErrors(() => runCli([command, ...args]));
+      const errors = await captureErrors(() => runCli([command, ...args], {}));
       assert.equal(errors.code, 1, command);
       assert.match(errors.text, /one of --db <path> or --postgres <url>/, command);
     }
@@ -282,5 +315,143 @@ describe('CLI command execution', () => {
     } finally {
       db.close();
     }
+  });
+});
+
+describe('DATABASE_URL fallback', () => {
+  // Nothing listens on port 1. A connection attempt against it is how these
+  // cases prove the CLI took the string and tried to use it, without needing a
+  // server: the password in it is also what proves redaction still holds.
+  const UNREACHABLE = 'postgres://user:hunter2@127.0.0.1:1/nope';
+
+  it('supplies the Postgres target for every command when no engine flag is passed', async () => {
+    for (const [command, args] of [
+      ['migrate', []],
+      ['ingest', ['--from', '1', '--to', '2']],
+      ['poll', ['--once']],
+    ] as const) {
+      const run = await captureCli([command, ...args], { DATABASE_URL: UNREACHABLE });
+
+      // Exit 1 because the address is dead, not because an argument was
+      // missing: reaching "could not open" means the engine was resolved.
+      assert.equal(run.code, 1, command);
+      assert.match(run.err, /could not open/, command);
+      assert.doesNotMatch(run.err, /Missing required argument/, command);
+      assert.doesNotMatch(`${run.out}${run.err}`, /hunter2/, command);
+    }
+  });
+
+  it('names the environment in the banner, with the password still masked', async () => {
+    const run = await captureCli(['ingest', '--from', '1', '--to', '2'], {
+      DATABASE_URL: UNREACHABLE,
+    });
+
+    assert.equal(run.code, 1);
+    assert.match(
+      run.out,
+      /Database: postgres:\/\/user:\*\*\*@127\.0\.0\.1:1\/nope \(from DATABASE_URL\)/,
+    );
+  });
+
+  it('does not claim the environment when --postgres named the target', async () => {
+    const run = await captureCli(
+      ['ingest', '--from', '1', '--to', '2', '--postgres', UNREACHABLE],
+      {
+        DATABASE_URL: 'postgres://ignored@127.0.0.1:1/other',
+      },
+    );
+
+    assert.equal(run.code, 1);
+    assert.doesNotMatch(run.out, /from DATABASE_URL/);
+    assert.doesNotMatch(run.out, /ignored/, 'the flag names the target, so the variable is unused');
+  });
+
+  it('lets an explicit --db win over a DATABASE_URL in the environment', async () => {
+    // The sharp end of "flags override": a set variable must not redirect a run
+    // that said where to go. Proven by the SQLite file actually being migrated.
+    const dbPath = tempDbPath();
+    const run = await captureCli(['migrate', '--db', dbPath], { DATABASE_URL: UNREACHABLE });
+
+    assert.equal(run.code, 0);
+    const db = openDb(dbPath);
+    try {
+      assert.ok(appliedMigrations(db).length >= 7);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still rejects --db and --postgres together when DATABASE_URL is set', async () => {
+    // The fallback is consulted only when neither flag was given, so an
+    // ambiguous pair stays ambiguous rather than gaining a third candidate.
+    for (const command of ['migrate', 'ingest', 'poll']) {
+      const run = await captureCli([command, '--db', './x.db', '--postgres', UNREACHABLE], {
+        DATABASE_URL: UNREACHABLE,
+      });
+      assert.equal(run.code, 1, command);
+      assert.match(run.err, /Pass either --db or --postgres, not both/, command);
+    }
+  });
+
+  it('treats an empty or whitespace-only DATABASE_URL as unset', async () => {
+    // The shape CI leaves behind when a variable is exported without a value.
+    // Connecting to "" would fail with a driver error that says nothing useful.
+    for (const value of ['', '   ']) {
+      const run = await captureCli(['migrate'], { DATABASE_URL: value });
+      assert.equal(run.code, 1, JSON.stringify(value));
+      assert.match(run.err, /one of --db <path> or --postgres <url>/, JSON.stringify(value));
+    }
+  });
+
+  it('points at DATABASE_URL when nothing names a database at all', async () => {
+    const run = await captureCli(['migrate'], {});
+    assert.equal(run.code, 1);
+    assert.match(run.err, /or set DATABASE_URL/);
+  });
+
+  it('documents the variable in the help text', async () => {
+    const run = await captureCli(['--help'], {});
+    assert.equal(run.code, 0);
+    assert.match(run.out, /DATABASE_URL/);
+  });
+});
+
+describe('applyEnvFallback', () => {
+  it('fills postgres from the environment and records where it came from', () => {
+    const parsed = applyEnvFallback(parseCliArgs(['migrate']), {
+      DATABASE_URL: 'postgres://localhost:5432/xlm',
+    });
+
+    assert.equal(parsed.postgres, 'postgres://localhost:5432/xlm');
+    assert.equal(parsed.postgresFromEnv, true);
+    assert.equal(parsed.db, undefined);
+  });
+
+  it('trims the value, so a trailing newline from a secrets file is not sent to the driver', () => {
+    const parsed = applyEnvFallback(parseCliArgs(['migrate']), {
+      DATABASE_URL: '  postgres://localhost:5432/xlm\n',
+    });
+
+    assert.equal(parsed.postgres, 'postgres://localhost:5432/xlm');
+  });
+
+  it('returns the parsed args untouched when a flag already named the engine', () => {
+    for (const argv of [
+      ['migrate', '--db', './x.db'],
+      ['migrate', '--postgres', 'postgres://localhost:5432/flag'],
+    ]) {
+      const parsed = parseCliArgs(argv);
+      const resolved = applyEnvFallback(parsed, { DATABASE_URL: 'postgres://localhost:5432/env' });
+
+      assert.equal(resolved, parsed, argv.join(' '));
+      assert.equal(resolved.postgresFromEnv, false, argv.join(' '));
+    }
+  });
+
+  it('leaves both unset when the environment has no DATABASE_URL', () => {
+    const parsed = applyEnvFallback(parseCliArgs(['migrate']), {});
+    assert.equal(parsed.postgres, undefined);
+    assert.equal(parsed.db, undefined);
+    assert.equal(parsed.postgresFromEnv, false);
   });
 });
