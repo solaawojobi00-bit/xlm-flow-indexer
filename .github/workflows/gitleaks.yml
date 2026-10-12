@@ -84,7 +84,7 @@ jobs:
     name: gitleaks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # Commit ranges and the weekly full sweep both need real history. The
           # default shallow clone would silently reduce every scan to one commit.
